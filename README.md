@@ -79,6 +79,30 @@ Run `python copilot_adapter.py serve` and visit `http://127.0.0.1:8080/v1/models
 
 Note: some newer models (e.g. `gpt-5.4`) only support the `/v1/responses` endpoint, not `/v1/chat/completions`.
 
+## Tests
+
+The test suite runs integration tests against the live Copilot API.
+
+```bash
+pip install -r tests/requirements.txt
+
+# Run all 57 tests (authenticates on first run via device flow)
+python -m pytest
+
+# Run a specific test module
+python -m pytest tests/test_client.py
+python -m pytest tests/test_adapters.py
+python -m pytest tests/test_endpoints.py
+```
+
+Tests are organized into three modules:
+
+- **`test_client.py`** — `CopilotClient` directly: models, chat completions, streaming, responses API, embeddings
+- **`test_adapters.py`** — format adapters end-to-end: OpenAI passthrough, Anthropic Messages, Gemini generateContent (streaming + non-streaming, multi-turn, system messages, parameter mapping)
+- **`test_endpoints.py`** — FastAPI routes via ASGI transport: all endpoints across all three API formats
+
+Tests use the cheapest available models (`gpt-4o-mini` for chat, `gpt-5-mini` for responses, `text-embedding-3-small` for embeddings) to minimize premium request usage. Model constants are centralized in `tests/conftest.py`.
+
 ## How it works
 
 1. **Device flow OAuth** authenticates with GitHub and stores a token in `~/.config/copilot-api/token.json`
