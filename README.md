@@ -4,6 +4,16 @@ An OpenAI / Anthropic / Gemini-compatible LLM API server backed by GitHub Copilo
 
 Authenticates via a GitHub Personal Access Token (PAT) or GitHub's device flow, then proxies requests to GitHub Copilot's backend through a local server that speaks all three major LLM API formats.
 
+## Key features
+
+- **Three API formats** — Serves OpenAI, Anthropic, and Gemini endpoints simultaneously, so any SDK or tool that speaks one of these formats works out of the box
+- **Streaming support** — Full SSE streaming across all three formats, including real-time format translation for Anthropic and Gemini streams
+- **Flexible authentication** — Supports GitHub PAT, `GITHUB_TOKEN` env var, cached tokens, and interactive device-flow OAuth, with automatic fallback
+- **Premium request billing control** — Forwards the `X-Initiator` header so agentic clients can mark follow-up calls as `agent` to avoid extra premium request charges
+- **CORS support** — Optional `--cors-origin` flag for browser-based applications
+- **Concurrent-safe token management** — Double-checked locking ensures only one token refresh happens at a time under concurrent load
+- **Object-oriented architecture** — Clean `FormatAdapter` / `StreamConverter` abstractions make it straightforward to add new API formats
+
 ## Prerequisites
 
 - Python 3.10+
