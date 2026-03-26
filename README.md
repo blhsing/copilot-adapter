@@ -4,6 +4,12 @@ An OpenAI / Anthropic / Gemini-compatible LLM API server backed by GitHub Copilo
 
 Authenticates via GitHub's device flow, then proxies requests to GitHub Copilot's backend through a local server that speaks all three major LLM API formats.
 
+## Prerequisites
+
+- Python 3.10+
+- pip
+- A [GitHub Copilot](https://github.com/features/copilot) subscription (Individual, Business, or Enterprise)
+
 ## Setup
 
 ```bash
