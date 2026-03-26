@@ -61,6 +61,15 @@ GET  /v1beta/models/{model}
 
 All endpoints support streaming.
 
+## Premium request billing
+
+GitHub Copilot uses the `X-Initiator` header to determine whether an API call counts as a premium request:
+
+- `X-Initiator: user` — counts as a premium request (default)
+- `X-Initiator: agent` — free (treated as an autonomous agent follow-up)
+
+Callers can pass this header through to the proxy. When omitted, it defaults to `user`. If you're using an agentic client (e.g. Claude Code) that makes multiple API calls per user turn, have it send `X-Initiator: agent` on follow-up/tool-call requests to avoid burning extra premium requests.
+
 ## Client configuration
 
 Point any OpenAI, Anthropic, or Gemini SDK client at the local server:
