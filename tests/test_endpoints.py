@@ -21,7 +21,9 @@ class TestHealth:
     async def test_root(self, http_client: httpx.AsyncClient):
         resp = await http_client.get("/")
         assert resp.status_code == 200
-        assert resp.json()["status"] == "ok"
+        body = resp.json()
+        assert body["status"] == "ok"
+        assert body["service"] == "copilot-adapter"
 
 
 # ===================================================================
