@@ -10,6 +10,7 @@ Authenticates via a GitHub Personal Access Token (PAT) or GitHub's device flow, 
 - **Streaming support** — Full SSE streaming across all three formats, including real-time format translation for Anthropic and Gemini streams
 - **Flexible authentication** — Supports GitHub PAT, `GITHUB_TOKEN` env var, cached tokens, and interactive device-flow OAuth, with automatic fallback
 - **Premium request billing control** — Forwards the `X-Initiator` header so agentic clients can mark follow-up calls as `agent` to avoid extra premium request charges
+- **Multi-worker support** — `--workers N` spawns multiple uvicorn worker processes for higher throughput (defaults to 1)
 - **CORS support** — Optional `--cors-origin` flag for browser-based applications
 - **Concurrent-safe token management** — Double-checked locking ensures only one token refresh happens at a time under concurrent load
 - **Object-oriented architecture** — Clean `FormatAdapter` / `StreamConverter` abstractions make it straightforward to add new API formats
@@ -42,6 +43,9 @@ python copilot_adapter.py serve
 
 # Options
 python copilot_adapter.py serve --host 0.0.0.0 --port 8080
+
+# Multiple worker processes for higher throughput (default: 1)
+python copilot_adapter.py serve --workers 4
 
 # Remove stored credentials
 python copilot_adapter.py logout
