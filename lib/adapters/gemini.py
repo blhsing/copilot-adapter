@@ -342,3 +342,13 @@ class GeminiAdapter(FormatAdapter):
 
     def convert_single_model(self, openai_model: dict) -> dict:
         return _openai_model_to_gemini(openai_model)
+
+    def infer_initiator(self, body: dict) -> str:
+        contents = body.get("contents", [])
+        if not contents:
+            return "user"
+        last_parts = contents[-1].get("parts", [])
+        for part in last_parts:
+            if "functionResponse" in part:
+                return "agent"
+        return "user"

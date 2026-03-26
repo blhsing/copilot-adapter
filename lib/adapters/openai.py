@@ -32,3 +32,9 @@ class OpenAIAdapter(FormatAdapter):
 
     def convert_models_response(self, openai_resp: dict) -> dict:
         return openai_resp
+
+    def infer_initiator(self, body: dict) -> str:
+        messages = body.get("messages", [])
+        if messages and messages[-1].get("role") == "tool":
+            return "agent"
+        return "user"

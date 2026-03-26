@@ -9,7 +9,7 @@ Authenticates via a GitHub Personal Access Token (PAT) or GitHub's device flow, 
 - **Three API formats** — Serves OpenAI, Anthropic, and Gemini endpoints simultaneously, so any SDK or tool that speaks one of these formats works out of the box
 - **Streaming support** — Full SSE streaming across all three formats, including real-time format translation for Anthropic and Gemini streams
 - **Flexible authentication** — Supports GitHub PAT, `GITHUB_TOKEN` env var, cached tokens, and interactive device-flow OAuth, with automatic fallback
-- **Premium request billing control** — Forwards the `X-Initiator` header so agentic clients can mark follow-up calls as `agent` to avoid extra premium request charges
+- **Smart premium request billing** — Automatically infers `X-Initiator: agent` for agentic follow-ups (tool results) to avoid extra premium request charges, with no client-side changes needed; also supports explicit `X-Initiator` header passthrough
 - **Multi-worker support** — `--workers N` spawns multiple uvicorn worker processes for higher throughput (defaults to 1)
 - **CORS support** — Optional `--cors-origin` flag for browser-based applications
 - **Concurrent-safe token management** — Double-checked locking ensures only one token refresh happens at a time under concurrent load
@@ -85,10 +85,19 @@ All endpoints support streaming.
 
 GitHub Copilot uses the `X-Initiator` header to determine whether an API call counts as a premium request:
 
-- `X-Initiator: user` — counts as a premium request (default)
+- `X-Initiator: user` — counts as a premium request
 - `X-Initiator: agent` — free (treated as an autonomous agent follow-up)
 
-Callers can pass this header through to the proxy. When omitted, it defaults to `user`. If you're using an agentic client (e.g. Claude Code) that makes multiple API calls per user turn, have it send `X-Initiator: agent` on follow-up/tool-call requests to avoid burning extra premium requests.
+The proxy handles this automatically. When no `X-Initiator` header is provided by the caller, it inspects the request body and infers the correct value:
+
+- **OpenAI format** — `agent` if the last message has `role: "tool"`
+- **Anthropic format** — `agent` if the last message contains a `tool_result` content block
+- **Gemini format** — `agent` if the last turn contains a `functionResponse` part
+- Otherwise — `user`
+
+This means agentic clients like Claude Code that make multiple API calls per user turn (tool-use loops, retries) will only consume one premium request for the initial prompt — follow-up calls with tool results are automatically marked as `agent`. No client-side changes needed.
+
+Callers can also pass `X-Initiator` explicitly to override the heuristic.
 
 ## Client configuration
 
