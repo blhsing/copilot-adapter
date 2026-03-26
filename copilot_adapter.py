@@ -25,14 +25,17 @@ def logout():
 @main.command()
 @click.option("--host", default="127.0.0.1", help="Host to bind to.")
 @click.option("--port", default=8080, type=int, help="Port to bind to.")
-def serve(host: str, port: int):
+@click.option("--github-token", default=None, envvar="GITHUB_TOKEN",
+              help="GitHub PAT or OAuth token. Falls back to GITHUB_TOKEN env var, "
+                   "then cached token, then interactive device flow.")
+def serve(host: str, port: int, github_token: str | None):
     """Start the OpenAI-compatible API server."""
     import uvicorn
 
-    from lib.auth import CopilotTokenManager, device_flow_login
+    from lib.auth import CopilotTokenManager, resolve_github_token
     from lib.server import init_app
 
-    github_token = device_flow_login()
+    github_token = resolve_github_token(github_token)
     tm = CopilotTokenManager(github_token)
 
     # Verify we can get a Copilot token

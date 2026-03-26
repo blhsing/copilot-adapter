@@ -13,10 +13,15 @@ pip install -r requirements.txt
 ## Usage
 
 ```bash
-# Authenticate with GitHub (opens browser)
-python copilot_adapter.py login
+# Start the server with a GitHub PAT (no interactive login needed)
+python copilot_adapter.py serve --github-token ghp_xxx
 
-# Start the API server
+# Or use an environment variable
+export GITHUB_TOKEN=ghp_xxx
+python copilot_adapter.py serve
+
+# Interactive device-flow login (opens browser)
+python copilot_adapter.py login
 python copilot_adapter.py serve
 
 # Options
@@ -26,7 +31,7 @@ python copilot_adapter.py serve --host 0.0.0.0 --port 8080
 python copilot_adapter.py logout
 ```
 
-On first run, `serve` will trigger the login flow automatically.
+Token lookup order: `--github-token` flag > `GITHUB_TOKEN` env var > cached token > interactive device flow.
 
 ## Endpoints
 
