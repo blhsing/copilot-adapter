@@ -24,7 +24,7 @@ def logout():
 
 @main.command()
 @click.option("--host", default="127.0.0.1", help="Host to bind to.")
-@click.option("--port", default=8080, type=int, help="Port to bind to.")
+@click.option("--port", default=18080, type=int, help="Port to bind to.")
 @click.option("--github-token", default=None, envvar="GITHUB_TOKEN",
               help="GitHub PAT or OAuth token. Falls back to GITHUB_TOKEN env var, "
                    "then cached token, then interactive device flow.")

@@ -11,6 +11,7 @@ Authenticates via a GitHub Personal Access Token (PAT) or GitHub's device flow, 
 - **Flexible authentication** — Supports GitHub PAT, `GITHUB_TOKEN` env var, cached tokens, and interactive device-flow OAuth, with automatic fallback
 - **Smart premium request billing** — Automatically infers `X-Initiator: agent` for agentic follow-ups (tool results) to avoid extra premium request charges, with no client-side changes needed; also supports explicit `X-Initiator` header passthrough
 - **Multi-worker support** — `--workers N` spawns multiple uvicorn worker processes for higher throughput (defaults to 1)
+- **Docker ready** — Single `docker run` to deploy with a GitHub PAT
 - **CORS support** — Optional `--cors-origin` flag for browser-based applications
 - **Concurrent-safe token management** — Double-checked locking ensures only one token refresh happens at a time under concurrent load
 - **Object-oriented architecture** — Clean `FormatAdapter` / `StreamConverter` abstractions make it straightforward to add new API formats
@@ -42,7 +43,7 @@ python copilot_adapter.py login
 python copilot_adapter.py serve
 
 # Options
-python copilot_adapter.py serve --host 0.0.0.0 --port 8080
+python copilot_adapter.py serve --host 0.0.0.0 --port 18080
 
 # Multiple worker processes for higher throughput (default: 1)
 python copilot_adapter.py serve --workers 4
@@ -60,11 +61,11 @@ Token lookup order: `--github-token` flag > `GITHUB_TOKEN` env var > cached toke
 docker build -t copilot-adapter .
 
 # Run
-docker run -p 8080:8080 -e GITHUB_TOKEN=ghp_xxx copilot-adapter
+docker run -p 18080:18080 -e GITHUB_TOKEN=ghp_xxx copilot-adapter
 
 # With options
-docker run -p 8080:8080 -e GITHUB_TOKEN=ghp_xxx copilot-adapter \
-  serve --host 0.0.0.0 --port 8080 --workers 4 --cors-origin '*'
+docker run -p 18080:18080 -e GITHUB_TOKEN=ghp_xxx copilot-adapter \
+  serve --host 0.0.0.0 --port 18080 --workers 4 --cors-origin '*'
 ```
 
 ## Endpoints
@@ -119,20 +120,20 @@ Point any OpenAI, Anthropic, or Gemini SDK client at the local server:
 
 ```bash
 # OpenAI
-export OPENAI_BASE_URL=http://127.0.0.1:8080/v1
+export OPENAI_BASE_URL=http://127.0.0.1:18080/v1
 export OPENAI_API_KEY=unused
 
 # Anthropic
-export ANTHROPIC_BASE_URL=http://127.0.0.1:8080
+export ANTHROPIC_BASE_URL=http://127.0.0.1:18080
 export ANTHROPIC_API_KEY=unused
 
 # Gemini
-export GEMINI_API_BASE=http://127.0.0.1:8080/v1beta
+export GEMINI_API_BASE=http://127.0.0.1:18080/v1beta
 ```
 
 ## Available models
 
-Run `python copilot_adapter.py serve` and visit `http://127.0.0.1:8080/v1/models` to see all models available through your Copilot subscription. Models include offerings from OpenAI, Anthropic, Google, and xAI.
+Run `python copilot_adapter.py serve` and visit `http://127.0.0.1:18080/v1/models` to see all models available through your Copilot subscription. Models include offerings from OpenAI, Anthropic, Google, and xAI.
 
 Note: some newer models (e.g. `gpt-5.4`) only support the `/v1/responses` endpoint, not `/v1/chat/completions`.
 
