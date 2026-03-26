@@ -53,6 +53,20 @@ python copilot_adapter.py logout
 
 Token lookup order: `--github-token` flag > `GITHUB_TOKEN` env var > cached token > interactive device flow.
 
+### Docker
+
+```bash
+# Build
+docker build -t copilot-adapter .
+
+# Run
+docker run -p 8080:8080 -e GITHUB_TOKEN=ghp_xxx copilot-adapter
+
+# With options
+docker run -p 8080:8080 -e GITHUB_TOKEN=ghp_xxx copilot-adapter \
+  serve --host 0.0.0.0 --port 8080 --workers 4 --cors-origin '*'
+```
+
 ## Endpoints
 
 ### [OpenAI](https://platform.openai.com/docs/api-reference)
