@@ -28,7 +28,9 @@ def logout():
 @click.option("--github-token", default=None, envvar="GITHUB_TOKEN",
               help="GitHub PAT or OAuth token. Falls back to GITHUB_TOKEN env var, "
                    "then cached token, then interactive device flow.")
-def serve(host: str, port: int, github_token: str | None):
+@click.option("--cors-origin", multiple=True,
+              help="Allowed CORS origin (repeatable). Use '*' to allow all origins.")
+def serve(host: str, port: int, github_token: str | None, cors_origin: tuple[str, ...]):
     """Start the OpenAI-compatible API server."""
     import uvicorn
 
@@ -54,7 +56,7 @@ def serve(host: str, port: int, github_token: str | None):
     print(f"  GET  /v1beta/models")
     print(f"  POST /v1/embeddings\n")
 
-    application = init_app(tm)
+    application = init_app(tm, cors_origins=list(cors_origin) or None)
     uvicorn.run(application, host=host, port=port, log_level="info")
 
 

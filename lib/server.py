@@ -20,9 +20,22 @@ _STREAM_HEADERS = {
 }
 
 
-def init_app(tm: CopilotTokenManager) -> FastAPI:
+def init_app(
+    tm: CopilotTokenManager, cors_origins: list[str] | None = None
+) -> FastAPI:
     global client
     client = CopilotClient(tm)
+
+    if cors_origins:
+        from fastapi.middleware.cors import CORSMiddleware
+
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=cors_origins,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+
     return app
 
 
