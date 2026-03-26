@@ -55,7 +55,7 @@ Token lookup order: `--github-token` flag > `GITHUB_TOKEN` env var > cached toke
 
 ## Endpoints
 
-### OpenAI
+### [OpenAI](https://platform.openai.com/docs/api-reference)
 
 ```
 POST /v1/chat/completions
@@ -64,13 +64,13 @@ GET  /v1/models
 POST /v1/embeddings
 ```
 
-### Anthropic
+### [Anthropic](https://docs.anthropic.com/en/api)
 
 ```
 POST /v1/messages
 ```
 
-### Gemini
+### [Gemini](https://ai.google.dev/api)
 
 ```
 POST /v1beta/models/{model}:generateContent
