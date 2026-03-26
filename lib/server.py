@@ -189,4 +189,4 @@ async def gemini_stream_generate_content(model_id: str, request: Request):
 
 @app.get("/")
 async def health():
-    return {"status": "ok", "service": "copilot-api"}
+    return {"status": "ok", "service": "copilot-adapter"}
