@@ -126,5 +126,5 @@ Tests use the cheapest available models (`gpt-4o-mini` for chat, `gpt-5-mini` fo
 ## How it works
 
 1. **Device flow OAuth** authenticates with GitHub and stores a token in `~/.config/copilot-api/token.json`
-2. The GitHub token is exchanged for a short-lived Copilot API token via `api.github.com/copilot_internal/v2/token`, automatically refreshed every ~25 minutes
+2. The GitHub token is exchanged for a short-lived Copilot API token via `api.github.com/copilot_internal/v2/token`, automatically refreshed every ~25 minutes with concurrent-access protection (double-checked locking ensures only one refresh happens at a time)
 3. Incoming requests are translated (if needed) to the format Copilot expects, proxied to `api.githubcopilot.com`, and responses are translated back to the client's expected format
