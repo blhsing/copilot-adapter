@@ -19,7 +19,7 @@ class CopilotClient:
     def __init__(self, token_manager: CopilotTokenManager):
         self._token_manager = token_manager
 
-    def _headers(self) -> dict[str, str]:
+    def _headers(self, initiator: str = "user") -> dict[str, str]:
         return {
             "authorization": f"Bearer {self._token_manager.get_token()}",
             "content-type": "application/json",
@@ -31,24 +31,29 @@ class CopilotClient:
             "openai-intent": "conversation-panel",
             "user-agent": "GitHubCopilotChat/0.23.0",
             "x-request-id": str(uuid.uuid4()),
+            "x-initiator": initiator,
             "vscode-sessionid": _SESSION_ID,
             "vscode-machineid": _MACHINE_ID,
         }
 
-    async def chat_completions(self, body: dict) -> httpx.Response:
+    async def chat_completions(
+        self, body: dict, *, initiator: str = "user"
+    ) -> httpx.Response:
         async with httpx.AsyncClient(timeout=120) as client:
             return await client.post(
                 f"{COPILOT_API}/chat/completions",
-                headers=self._headers(),
+                headers=self._headers(initiator),
                 json=body,
             )
 
-    async def stream_chat_completions(self, body: dict) -> AsyncIterator[str]:
+    async def stream_chat_completions(
+        self, body: dict, *, initiator: str = "user"
+    ) -> AsyncIterator[str]:
         async with httpx.AsyncClient(timeout=120) as client:
             async with client.stream(
                 "POST",
                 f"{COPILOT_API}/chat/completions",
-                headers=self._headers(),
+                headers=self._headers(initiator),
                 json=body,
             ) as response:
                 if response.status_code != 200:
@@ -58,20 +63,24 @@ class CopilotClient:
                 async for line in response.aiter_lines():
                     yield line
 
-    async def responses(self, body: dict) -> httpx.Response:
+    async def responses(
+        self, body: dict, *, initiator: str = "user"
+    ) -> httpx.Response:
         async with httpx.AsyncClient(timeout=120) as client:
             return await client.post(
                 f"{COPILOT_API}/responses",
-                headers=self._headers(),
+                headers=self._headers(initiator),
                 json=body,
             )
 
-    async def stream_responses(self, body: dict) -> AsyncIterator[str]:
+    async def stream_responses(
+        self, body: dict, *, initiator: str = "user"
+    ) -> AsyncIterator[str]:
         async with httpx.AsyncClient(timeout=120) as client:
             async with client.stream(
                 "POST",
                 f"{COPILOT_API}/responses",
-                headers=self._headers(),
+                headers=self._headers(initiator),
                 json=body,
             ) as response:
                 if response.status_code != 200:
@@ -87,10 +96,12 @@ class CopilotClient:
                 f"{COPILOT_API}/models", headers=self._headers()
             )
 
-    async def embeddings(self, body: dict) -> httpx.Response:
+    async def embeddings(
+        self, body: dict, *, initiator: str = "user"
+    ) -> httpx.Response:
         async with httpx.AsyncClient(timeout=60) as client:
             return await client.post(
                 f"{COPILOT_API}/embeddings",
-                headers=self._headers(),
+                headers=self._headers(initiator),
                 json=body,
             )
