@@ -31,6 +31,29 @@ def _load_github_token() -> str | None:
     return None
 
 
+def resolve_github_token(explicit_token: str | None = None) -> str:
+    """Return a GitHub token using the first available source.
+
+    Lookup order: *explicit_token* arg > ``GITHUB_TOKEN`` env var >
+    cached token file > interactive device-flow OAuth.
+    """
+    import os
+
+    token = explicit_token or os.environ.get("GITHUB_TOKEN")
+    if token:
+        r = httpx.get(
+            "https://api.github.com/user",
+            headers={"authorization": f"token {token}", "accept": "application/json"},
+        )
+        if r.status_code == 200:
+            user = r.json().get("login", "unknown")
+            print(f"Authenticated as {user}")
+            return token
+        raise RuntimeError("Provided GitHub token is invalid or expired.")
+
+    return device_flow_login()
+
+
 def device_flow_login() -> str:
     """Run the GitHub device-flow OAuth and return a GitHub access token."""
     existing = _load_github_token()
