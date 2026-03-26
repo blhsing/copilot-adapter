@@ -69,14 +69,15 @@ def init_app(
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _get_initiator(request: Request) -> str:
-    """Extract X-Initiator from the incoming request, defaulting to 'user'."""
-    return request.headers.get("x-initiator", "user")
+def _get_initiator(request: Request) -> str | None:
+    """Extract X-Initiator from the incoming request, or None if absent."""
+    return request.headers.get("x-initiator")
 
 
 async def handle_chat_completion(
-    adapter: FormatAdapter, body: dict, *, initiator: str = "user"
+    adapter: FormatAdapter, body: dict, *, initiator: str | None = None
 ):
+    resolved = initiator or adapter.infer_initiator(body)
     openai_body = adapter.convert_chat_request(body)
 
     if adapter.is_streaming(body) or openai_body.get("stream"):
@@ -84,7 +85,7 @@ async def handle_chat_completion(
 
         async def event_stream():
             async for line in client.stream_chat_completions(
-                openai_body, initiator=initiator
+                openai_body, initiator=resolved
             ):
                 if line.startswith("error:"):
                     yield converter.format_error(line)
@@ -97,7 +98,7 @@ async def handle_chat_completion(
             event_stream(), media_type="text/event-stream", headers=_STREAM_HEADERS
         )
 
-    resp = await client.chat_completions(openai_body, initiator=initiator)
+    resp = await client.chat_completions(openai_body, initiator=resolved)
     return JSONResponse(
         content=adapter.convert_chat_response(resp.json(), body),
         status_code=resp.status_code,
@@ -131,7 +132,7 @@ async def chat_completions(request: Request):
 @app.post("/responses")
 async def responses(request: Request):
     body = await request.json()
-    initiator = _get_initiator(request)
+    initiator = _get_initiator(request) or "user"
 
     if body.get("stream"):
         converter = openai_adapter.create_stream_converter(body)
@@ -157,7 +158,7 @@ async def responses(request: Request):
 @app.post("/embeddings")
 async def embeddings(request: Request):
     body = await request.json()
-    resp = await client.embeddings(body, initiator=_get_initiator(request))
+    resp = await client.embeddings(body, initiator=_get_initiator(request) or "user")
     try:
         content = resp.json()
     except Exception:
@@ -219,15 +220,15 @@ async def gemini_generate_content(model_id: str, request: Request):
 @app.post("/v1beta/models/{model_id}:streamGenerateContent")
 async def gemini_stream_generate_content(model_id: str, request: Request):
     body = await request.json()
-    initiator = _get_initiator(request)
     adapter = GeminiAdapter(model_id)
+    resolved = _get_initiator(request) or adapter.infer_initiator(body)
     openai_body = adapter.convert_chat_request(body)
     openai_body["stream"] = True
     converter = adapter.create_stream_converter(body)
 
     async def event_stream():
         async for line in client.stream_chat_completions(
-            openai_body, initiator=initiator
+            openai_body, initiator=resolved
         ):
             if line.startswith("error:"):
                 yield converter.format_error(line)

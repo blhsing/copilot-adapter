@@ -383,3 +383,15 @@ class AnthropicAdapter(FormatAdapter):
 
     def convert_models_response(self, openai_resp: dict) -> dict:
         return openai_resp
+
+    def infer_initiator(self, body: dict) -> str:
+        messages = body.get("messages", [])
+        if not messages:
+            return "user"
+        last = messages[-1]
+        content = last.get("content")
+        if isinstance(content, list):
+            for block in content:
+                if block.get("type") == "tool_result":
+                    return "agent"
+        return "user"

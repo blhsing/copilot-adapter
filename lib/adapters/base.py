@@ -37,3 +37,11 @@ class FormatAdapter(ABC):
     @abstractmethod
     def convert_models_response(self, openai_resp: dict) -> dict:
         """Convert an OpenAI model list response to this format."""
+
+    def infer_initiator(self, body: dict) -> str:
+        """Infer 'user' or 'agent' from the request body.
+
+        Returns 'agent' if the conversation appears to be an agentic
+        follow-up (e.g. the last message is a tool result), 'user' otherwise.
+        """
+        return "user"
