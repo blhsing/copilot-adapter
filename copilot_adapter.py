@@ -30,7 +30,10 @@ def logout():
                    "then cached token, then interactive device flow.")
 @click.option("--cors-origin", multiple=True,
               help="Allowed CORS origin (repeatable). Use '*' to allow all origins.")
-def serve(host: str, port: int, github_token: str | None, cors_origin: tuple[str, ...]):
+@click.option("--workers", default=1, type=int,
+              help="Number of worker processes.")
+def serve(host: str, port: int, github_token: str | None, cors_origin: tuple[str, ...],
+          workers: int):
     """Start the OpenAI-compatible API server."""
     import uvicorn
 
@@ -56,8 +59,19 @@ def serve(host: str, port: int, github_token: str | None, cors_origin: tuple[str
     print(f"  GET  /v1beta/models")
     print(f"  POST /v1/embeddings\n")
 
-    application = init_app(tm, cors_origins=list(cors_origin) or None)
-    uvicorn.run(application, host=host, port=port, log_level="info")
+    if workers > 1:
+        import os
+        # Workers initialize via the lifespan event using this env var
+        os.environ["_COPILOT_ADAPTER_GITHUB_TOKEN"] = github_token
+        if cors_origin:
+            os.environ["_COPILOT_ADAPTER_CORS_ORIGINS"] = ",".join(cors_origin)
+        uvicorn.run(
+            "lib.server:app", host=host, port=port,
+            workers=workers, log_level="info",
+        )
+    else:
+        application = init_app(tm, cors_origins=list(cors_origin) or None)
+        uvicorn.run(application, host=host, port=port, log_level="info")
 
 
 if __name__ == "__main__":

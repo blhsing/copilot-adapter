@@ -1,13 +1,14 @@
 """OpenAI-compatible API server that proxies to GitHub Copilot."""
 
+import os
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .adapters import AnthropicAdapter, FormatAdapter, GeminiAdapter, OpenAIAdapter
 from .auth import CopilotTokenManager
 from .client import CopilotClient
-
-app = FastAPI(title="Copilot API", version="0.1.0")
 
 client: CopilotClient | None = None
 openai_adapter = OpenAIAdapter()
@@ -18,6 +19,31 @@ _STREAM_HEADERS = {
     "Connection": "keep-alive",
     "X-Accel-Buffering": "no",
 }
+
+
+@asynccontextmanager
+async def _lifespan(application: FastAPI):
+    """Initialize the CopilotClient in each worker process on startup."""
+    global client
+    github_token = os.environ.get("_COPILOT_ADAPTER_GITHUB_TOKEN", "")
+    if github_token and client is None:
+        tm = CopilotTokenManager(github_token)
+        client = CopilotClient(tm)
+
+        cors_raw = os.environ.get("_COPILOT_ADAPTER_CORS_ORIGINS", "")
+        if cors_raw:
+            from fastapi.middleware.cors import CORSMiddleware
+
+            application.add_middleware(
+                CORSMiddleware,
+                allow_origins=cors_raw.split(","),
+                allow_methods=["*"],
+                allow_headers=["*"],
+            )
+    yield
+
+
+app = FastAPI(title="Copilot API", version="0.1.0", lifespan=_lifespan)
 
 
 def init_app(
