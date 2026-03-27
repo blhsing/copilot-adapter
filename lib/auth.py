@@ -87,6 +87,7 @@ def device_flow_login() -> str:
 
     print(f"\nPlease visit: {verification_uri}")
     print(f"and enter code: {user_code}\n")
+    input("Press Enter to open the browser...")
 
     try:
         webbrowser.open(verification_uri)
