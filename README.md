@@ -8,10 +8,11 @@ Authenticates via a GitHub Personal Access Token (PAT) or GitHub's device flow, 
 
 - **Three API formats** — Serves OpenAI, Anthropic, and Gemini endpoints simultaneously, so any SDK or tool that speaks one of these formats works out of the box
 - **Streaming support** — Full SSE streaming across all three formats, including real-time format translation for Anthropic and Gemini streams
-- **Flexible authentication** — Supports GitHub PAT, `GITHUB_TOKEN` env var, cached tokens, and interactive device-flow OAuth, with automatic fallback
+- **Flexible authentication** — Supports GitHub PAT, `COPILOT_ADAPTER_GITHUB_TOKEN` / `GITHUB_TOKEN` env vars, cached tokens, and interactive device-flow OAuth, with automatic fallback
 - **Smart premium request billing** — Automatically infers `X-Initiator: agent` for agentic follow-ups (tool results) to avoid extra premium request charges, with no client-side changes needed; also supports explicit `X-Initiator` header passthrough
-- **Multi-worker support** — `--workers N` spawns multiple uvicorn worker processes for higher throughput (defaults to 1)
+- **Multi-worker support** — `--workers N` spawns multiple uvicorn worker processes for higher throughput (defaults to number of CPUs)
 - **Docker ready** — Single `docker run` to deploy with a GitHub PAT
+- **Environment variable configuration** — All CLI options can be configured via environment variables for container and CI-friendly deployments
 - **CORS support** — Optional `--cors-origin` flag for browser-based applications
 - **Concurrent-safe token management** — Double-checked locking ensures only one token refresh happens at a time under concurrent load
 - **Object-oriented architecture** — Clean `FormatAdapter` / `StreamConverter` abstractions make it straightforward to add new API formats
@@ -35,7 +36,7 @@ pip install -r requirements.txt
 python copilot_adapter.py serve --github-token ghp_xxx
 
 # Or use an environment variable
-export GITHUB_TOKEN=ghp_xxx
+export COPILOT_ADAPTER_GITHUB_TOKEN=ghp_xxx
 python copilot_adapter.py serve
 
 # Interactive device-flow login (opens browser)
@@ -45,14 +46,28 @@ python copilot_adapter.py serve
 # Options
 python copilot_adapter.py serve --host 0.0.0.0 --port 18080
 
-# Multiple worker processes for higher throughput (default: 1)
+# Multiple worker processes for higher throughput (default: number of CPUs)
 python copilot_adapter.py serve --workers 4
 
 # Remove stored credentials
 python copilot_adapter.py logout
 ```
 
-Token lookup order: `--github-token` flag > `GITHUB_TOKEN` env var > cached token > interactive device flow.
+Token lookup order: `--github-token` flag > `COPILOT_ADAPTER_GITHUB_TOKEN` env var > `GITHUB_TOKEN` env var > cached token > interactive device flow.
+
+### Environment variables
+
+All CLI options can be set via environment variables:
+
+| Flag | Environment variable | Default |
+|------|---------------------|---------|
+| `--host` | `COPILOT_ADAPTER_HOST` | `127.0.0.1` |
+| `--port` | `COPILOT_ADAPTER_PORT` | `18080` |
+| `--github-token` | `COPILOT_ADAPTER_GITHUB_TOKEN` | *(none)* |
+| `--cors-origin` | `COPILOT_ADAPTER_CORS_ORIGIN` | *(none)* |
+| `--workers` | `COPILOT_ADAPTER_WORKERS` | number of CPUs |
+
+`GITHUB_TOKEN` is also accepted as a fallback for the GitHub token.
 
 ### Docker
 
@@ -61,11 +76,14 @@ Token lookup order: `--github-token` flag > `GITHUB_TOKEN` env var > cached toke
 docker build -t copilot-adapter .
 
 # Run
-docker run -p 18080:18080 -e GITHUB_TOKEN=ghp_xxx copilot-adapter
+docker run -p 18080:18080 -e COPILOT_ADAPTER_GITHUB_TOKEN=ghp_xxx copilot-adapter
 
 # With options
-docker run -p 18080:18080 -e GITHUB_TOKEN=ghp_xxx copilot-adapter \
-  serve --host 0.0.0.0 --port 18080 --workers 4 --cors-origin '*'
+docker run -p 18080:18080 \
+  -e COPILOT_ADAPTER_GITHUB_TOKEN=ghp_xxx \
+  -e COPILOT_ADAPTER_WORKERS=4 \
+  -e COPILOT_ADAPTER_CORS_ORIGIN='*' \
+  copilot-adapter
 ```
 
 ## Endpoints

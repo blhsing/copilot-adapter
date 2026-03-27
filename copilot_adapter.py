@@ -1,6 +1,10 @@
 """CLI entry point for copilot-api."""
 
+import os
+
 import click
+
+_NUM_CPUS = os.cpu_count() or 1
 
 
 @click.group()
@@ -23,15 +27,17 @@ def logout():
 
 
 @main.command()
-@click.option("--host", default="127.0.0.1", help="Host to bind to.")
-@click.option("--port", default=18080, type=int, help="Port to bind to.")
-@click.option("--github-token", default=None, envvar="GITHUB_TOKEN",
-              help="GitHub PAT or OAuth token. Falls back to GITHUB_TOKEN env var, "
+@click.option("--host", default="127.0.0.1", envvar="COPILOT_ADAPTER_HOST",
+              help="Host to bind to.")
+@click.option("--port", default=18080, type=int, envvar="COPILOT_ADAPTER_PORT",
+              help="Port to bind to.")
+@click.option("--github-token", default=None, envvar="COPILOT_ADAPTER_GITHUB_TOKEN",
+              help="GitHub PAT or OAuth token. Falls back to COPILOT_ADAPTER_GITHUB_TOKEN env var, "
                    "then cached token, then interactive device flow.")
-@click.option("--cors-origin", multiple=True,
+@click.option("--cors-origin", multiple=True, envvar="COPILOT_ADAPTER_CORS_ORIGIN",
               help="Allowed CORS origin (repeatable). Use '*' to allow all origins.")
-@click.option("--workers", default=1, type=int,
-              help="Number of worker processes.")
+@click.option("--workers", default=_NUM_CPUS, type=int, envvar="COPILOT_ADAPTER_WORKERS",
+              help=f"Number of worker processes (default: number of CPUs, {_NUM_CPUS}).")
 def serve(host: str, port: int, github_token: str | None, cors_origin: tuple[str, ...],
           workers: int):
     """Start the OpenAI-compatible API server."""
