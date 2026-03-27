@@ -35,8 +35,10 @@ def _load_github_token() -> str | None:
 def resolve_github_token(explicit_token: str | None = None) -> str:
     """Return a GitHub token using the first available source.
 
-    Lookup order: *explicit_token* arg > ``GITHUB_TOKEN`` env var >
-    cached token file > interactive device-flow OAuth.
+    Lookup order: *explicit_token* arg (which Click resolves from
+    ``--github-token`` flag or ``COPILOT_ADAPTER_GITHUB_TOKEN`` env var) >
+    ``GITHUB_TOKEN`` env var > cached token file > interactive device-flow
+    OAuth.
     """
     import os
 
