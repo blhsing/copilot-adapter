@@ -11,7 +11,7 @@ Authenticates via a GitHub Personal Access Token (PAT) or GitHub's device flow, 
 - **Flexible authentication** — Supports GitHub PAT, `COPILOT_ADAPTER_GITHUB_TOKEN` / `GITHUB_TOKEN` env vars, cached tokens, and interactive device-flow OAuth, with automatic fallback
 - **Smart premium request billing** — Automatically infers `X-Initiator: agent` for agentic follow-ups (tool results) to avoid extra premium request charges, with no client-side changes needed; also supports explicit `X-Initiator` header passthrough
 - **Multi-worker support** — `--workers N` spawns multiple uvicorn worker processes for higher throughput (defaults to number of CPUs)
-- **Docker ready** — Single `docker run` to deploy with a GitHub PAT
+- **Docker ready** — Pre-built image on [GHCR](https://github.com/blhsing/copilot-adapter/pkgs/container/copilot-adapter), or build locally
 - **Environment variable configuration** — All CLI options can be configured via environment variables for container and CI-friendly deployments
 - **CORS support** — Optional `--cors-origin` flag for browser-based applications
 - **Concurrent-safe token management** — Double-checked locking ensures only one token refresh happens at a time under concurrent load
@@ -71,19 +71,29 @@ All CLI options can be set via environment variables:
 
 ### Docker
 
-```bash
-# Build
-docker build -t copilot-adapter .
+A pre-built image is available on GitHub Container Registry:
 
+```bash
+docker pull ghcr.io/blhsing/copilot-adapter:latest
+```
+
+```bash
 # Run
-docker run -p 18080:18080 -e COPILOT_ADAPTER_GITHUB_TOKEN=ghp_xxx copilot-adapter
+docker run -p 18080:18080 -e COPILOT_ADAPTER_GITHUB_TOKEN=ghp_xxx ghcr.io/blhsing/copilot-adapter
 
 # With options
 docker run -p 18080:18080 \
   -e COPILOT_ADAPTER_GITHUB_TOKEN=ghp_xxx \
   -e COPILOT_ADAPTER_WORKERS=4 \
   -e COPILOT_ADAPTER_CORS_ORIGIN='*' \
-  copilot-adapter
+  ghcr.io/blhsing/copilot-adapter
+```
+
+Or build locally:
+
+```bash
+docker build -t copilot-adapter .
+docker run -p 18080:18080 -e COPILOT_ADAPTER_GITHUB_TOKEN=ghp_xxx copilot-adapter
 ```
 
 ## Endpoints
