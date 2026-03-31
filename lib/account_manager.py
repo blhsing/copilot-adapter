@@ -14,6 +14,60 @@ logger = logging.getLogger(__name__)
 
 QUOTA_REFRESH_INTERVAL = 300  # seconds between usage API checks
 
+# Premium request multipliers per plan type.
+# Source: https://docs.github.com/en/copilot/concepts/billing/copilot-requests
+# Models not listed default to 1.
+_PAID_MULTIPLIERS: dict[str, float] = {
+    # Free (0x)
+    "gpt-4.1": 0,
+    "gpt-4o": 0,
+    "gpt-5-mini": 0,
+    "raptor-mini": 0,
+    # Discounted (0.25x)
+    "grok-code-fast-1": 0.25,
+    # Discounted (0.33x)
+    "claude-haiku-4.5": 0.33,
+    "gemini-3-flash": 0.33,
+    "gpt-5.1-codex-mini": 0.33,
+    "gpt-5.4-mini": 0.33,
+    # Standard (1x) — omitted, default is 1
+    # Premium (3x)
+    "claude-opus-4.5": 3,
+    "claude-opus-4.6": 3,
+    # Ultra premium (30x)
+    "claude-opus-4.6-fast": 30,
+}
+
+# On the Free plan, every available model costs 1 premium request.
+_FREE_MULTIPLIERS: dict[str, float] = {}  # empty = all default to 1
+
+PLAN_MULTIPLIERS: dict[str, dict[str, float]] = {
+    "paid": _PAID_MULTIPLIERS,
+    "free": _FREE_MULTIPLIERS,
+}
+
+
+def get_model_multiplier(model: str, plan: str = "paid") -> float:
+    """Return the premium request multiplier for a model.
+
+    Uses prefix matching to handle date-suffixed model IDs
+    (e.g. ``gpt-4o-2024-07-18`` matches ``gpt-4o``).
+    Defaults to 1 for unknown models.
+    """
+    multipliers = PLAN_MULTIPLIERS.get(plan, _PAID_MULTIPLIERS)
+    if not multipliers:
+        return 1.0
+    if model in multipliers:
+        return multipliers[model]
+    # Try prefix match (longest prefix wins)
+    best_match = ""
+    for prefix in multipliers:
+        if model.startswith(prefix) and len(prefix) > len(best_match):
+            best_match = prefix
+    if best_match:
+        return multipliers[best_match]
+    return 1.0
+
 
 @dataclass
 class AccountInfo:
@@ -23,7 +77,7 @@ class AccountInfo:
     username: str
     token_manager: CopilotTokenManager
     client: CopilotClient
-    premium_used: int = 0
+    premium_used: float = 0
     premium_limit: int | None = None  # None = unknown (no --quota-limit)
     exhausted: bool = False
     last_quota_check: float = 0
@@ -44,6 +98,7 @@ class AccountManager:
         strategy: str = "max-usage",
         quota_limit: int | None = None,
         local_tracking: bool = False,
+        plan: str = "paid",
     ):
         if strategy not in self.STRATEGIES:
             raise ValueError(f"Unknown strategy: {strategy!r}")
@@ -52,6 +107,7 @@ class AccountManager:
 
         self._strategy = strategy
         self._local_tracking = local_tracking
+        self._plan = plan
         self._lock = threading.Lock()
         self._rr_index = -1
         self._last_user_account: AccountInfo | None = None
@@ -85,8 +141,10 @@ class AccountManager:
         """Return the CopilotClient to use for this request.
 
         For ``"agent"`` initiator, returns the same client as the most recent
-        ``"user"`` request. For ``"user"`` initiator, selects based on strategy
-        and increments the local usage counter when local tracking is enabled.
+        ``"user"`` request. For ``"user"`` initiator, selects based on strategy.
+
+        When local tracking is enabled, call :meth:`record_usage` after the
+        request to account for the model's premium request multiplier.
         """
         with self._lock:
             if initiator == "agent" and self._last_user_account is not None:
@@ -94,17 +152,31 @@ class AccountManager:
 
             acct = self._select_by_strategy()
             self._last_user_account = acct
-
-            if self._local_tracking:
-                acct.premium_used += 1
-                if acct.premium_limit is not None and acct.premium_used >= acct.premium_limit:
-                    acct.exhausted = True
-                    logger.info(
-                        "Account %s reached quota limit (%d/%d) via local tracking",
-                        acct.username, acct.premium_used, acct.premium_limit,
-                    )
-
             return acct.client
+
+    def record_usage(self, client: CopilotClient, model: str) -> None:
+        """Record a premium request for the account owning *client*.
+
+        Only has an effect when local tracking is enabled. Uses the model's
+        multiplier (based on the configured plan) to accurately track
+        premium request consumption.
+        """
+        if not self._local_tracking:
+            return
+        multiplier = get_model_multiplier(model, self._plan)
+        if multiplier == 0:
+            return
+        with self._lock:
+            for acct in self._accounts:
+                if acct.client is client:
+                    acct.premium_used += multiplier
+                    if acct.premium_limit is not None and acct.premium_used >= acct.premium_limit:
+                        acct.exhausted = True
+                        logger.info(
+                            "Account %s reached quota limit (%.1f/%d) via local tracking",
+                            acct.username, acct.premium_used, acct.premium_limit,
+                        )
+                    break
 
     def mark_exhausted(self, client: CopilotClient) -> None:
         """Mark the account associated with *client* as exhausted."""
@@ -144,12 +216,12 @@ class AccountManager:
                     item.get("netQuantity", 0)
                     for item in data.get("usageItems", [])
                 )
-                acct.premium_used = int(total)
+                acct.premium_used = total
                 acct.last_quota_check = time.time()
                 if acct.premium_limit is not None and acct.premium_used >= acct.premium_limit:
                     acct.exhausted = True
                     logger.info(
-                        "Account %s reached quota limit (%d/%d)",
+                        "Account %s reached quota limit (%.1f/%d)",
                         acct.username, acct.premium_used, acct.premium_limit,
                     )
             else:
