@@ -69,9 +69,13 @@ def accounts():
 @click.option("--quota-limit", default=None, type=int,
               envvar="COPILOT_ADAPTER_QUOTA_LIMIT",
               help="Monthly premium request limit per account for proactive switching.")
+@click.option("--local-tracking", is_flag=True, default=False,
+              envvar="COPILOT_ADAPTER_LOCAL_TRACKING",
+              help="Track usage locally instead of polling the GitHub billing API. "
+                   "Assumes this server is the only consumer of the quota.")
 def serve(host: str, port: int, github_token: tuple[str, ...],
           cors_origin: tuple[str, ...], workers: int, strategy: str,
-          quota_limit: int | None):
+          quota_limit: int | None, local_tracking: bool):
     """Start the OpenAI-compatible API server."""
     import uvicorn
 
@@ -83,7 +87,10 @@ def serve(host: str, port: int, github_token: tuple[str, ...],
     token_list = list(github_token) if github_token else None
     accounts = resolve_github_tokens(token_list)
 
-    acct_mgr = AccountManager(accounts, strategy=strategy, quota_limit=quota_limit)
+    acct_mgr = AccountManager(
+        accounts, strategy=strategy, quota_limit=quota_limit,
+        local_tracking=local_tracking,
+    )
 
     # Verify all accounts can get a Copilot token
     try:
@@ -111,6 +118,8 @@ def serve(host: str, port: int, github_token: tuple[str, ...],
         os.environ["_COPILOT_ADAPTER_STRATEGY"] = strategy
         if quota_limit is not None:
             os.environ["_COPILOT_ADAPTER_QUOTA_LIMIT"] = str(quota_limit)
+        if local_tracking:
+            os.environ["_COPILOT_ADAPTER_LOCAL_TRACKING"] = "1"
         if cors_origin:
             os.environ["_COPILOT_ADAPTER_CORS_ORIGINS"] = ",".join(cors_origin)
         uvicorn.run(

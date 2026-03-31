@@ -94,7 +94,7 @@ Agent-initiated requests (tool-use follow-ups) always stay on the same account a
 
 **Quota exhaustion detection**: When a Copilot account's premium request quota is exhausted, GitHub silently downgrades the response to a free fallback model (e.g. GPT-4.1) instead of returning an error. The server detects this by comparing the model in the response against the model that was requested — if they don't match, it marks the account as exhausted and automatically retries the request with the next available account. This works for both streaming and non-streaming requests.
 
-For proactive switching *before* hitting the limit, set `--quota-limit N` to the monthly premium request allowance of your plan (Free: 50, Pro: 300, Pro+: 1500). The server periodically checks each account's usage via the GitHub billing API and skips accounts that have reached the configured limit.
+For proactive switching *before* hitting the limit, set `--quota-limit N` to the monthly premium request allowance of your plan (Free: 50, Pro: 300, Pro+: 1500). By default the server periodically checks each account's usage via the GitHub billing API. If this server is the only consumer of the quota, add `--local-tracking` to count user-initiated requests in-memory instead — this eliminates all billing API calls and gives instant, accurate tracking without network overhead.
 
 ### Environment variables
 
@@ -109,6 +109,7 @@ All CLI options can be set via environment variables:
 | `--workers` | `COPILOT_ADAPTER_WORKERS` | number of CPUs |
 | `--strategy` | `COPILOT_ADAPTER_STRATEGY` | `max-usage` |
 | `--quota-limit` | `COPILOT_ADAPTER_QUOTA_LIMIT` | *(none)* |
+| `--local-tracking` | `COPILOT_ADAPTER_LOCAL_TRACKING` | off |
 
 `GITHUB_TOKEN` is also accepted as a fallback for the GitHub token. Multiple tokens can be comma-separated in `COPILOT_ADAPTER_GITHUB_TOKEN` or `GITHUB_TOKEN`.
 

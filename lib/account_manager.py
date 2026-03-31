@@ -41,8 +41,9 @@ class AccountManager:
     def __init__(
         self,
         accounts: list[tuple[str, str]],
-        strategy: str = "round-robin",
+        strategy: str = "max-usage",
         quota_limit: int | None = None,
+        local_tracking: bool = False,
     ):
         if strategy not in self.STRATEGIES:
             raise ValueError(f"Unknown strategy: {strategy!r}")
@@ -50,6 +51,7 @@ class AccountManager:
             raise ValueError("At least one account is required")
 
         self._strategy = strategy
+        self._local_tracking = local_tracking
         self._lock = threading.Lock()
         self._rr_index = -1
         self._last_user_account: AccountInfo | None = None
@@ -83,7 +85,8 @@ class AccountManager:
         """Return the CopilotClient to use for this request.
 
         For ``"agent"`` initiator, returns the same client as the most recent
-        ``"user"`` request. For ``"user"`` initiator, selects based on strategy.
+        ``"user"`` request. For ``"user"`` initiator, selects based on strategy
+        and increments the local usage counter when local tracking is enabled.
         """
         with self._lock:
             if initiator == "agent" and self._last_user_account is not None:
@@ -91,6 +94,16 @@ class AccountManager:
 
             acct = self._select_by_strategy()
             self._last_user_account = acct
+
+            if self._local_tracking:
+                acct.premium_used += 1
+                if acct.premium_limit is not None and acct.premium_used >= acct.premium_limit:
+                    acct.exhausted = True
+                    logger.info(
+                        "Account %s reached quota limit (%d/%d) via local tracking",
+                        acct.username, acct.premium_used, acct.premium_limit,
+                    )
+
             return acct.client
 
     def mark_exhausted(self, client: CopilotClient) -> None:
@@ -152,6 +165,13 @@ class AccountManager:
         for acct in self._accounts:
             self.refresh_quota(acct)
 
+    def _sync_usage_if_needed(self, available: list[AccountInfo]) -> None:
+        """Sync usage data from billing API unless local tracking is active."""
+        if self._local_tracking:
+            return
+        for acct in available:
+            self.refresh_quota(acct)
+
     def _select_by_strategy(self) -> AccountInfo:
         """Apply the configured rotation strategy. Must be called with lock held."""
         available = [a for a in self._accounts if not a.exhausted]
@@ -160,10 +180,9 @@ class AccountManager:
                 "All accounts have exhausted their premium request quota."
             )
 
-        # Lazily refresh quotas for usage-based strategies
+        # Sync usage for usage-based strategies (no-op if local tracking)
         if self._strategy in ("max-usage", "min-usage"):
-            for acct in available:
-                self.refresh_quota(acct)
+            self._sync_usage_if_needed(available)
             # Re-filter after refresh (some may have become exhausted)
             available = [a for a in self._accounts if not a.exhausted]
             if not available:

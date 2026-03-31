@@ -7,14 +7,16 @@ import pytest
 from lib.account_manager import AccountInfo, AccountManager
 
 
-def _make_manager(n: int = 3, strategy: str = "round-robin", quota_limit=None):
+def _make_manager(n: int = 3, strategy: str = "round-robin", quota_limit=None,
+                   local_tracking=False):
     """Create an AccountManager with *n* mock accounts."""
     accounts = [(f"token_{i}", f"user_{i}") for i in range(n)]
     with patch("lib.account_manager.CopilotTokenManager") as MockTM, \
          patch("lib.account_manager.CopilotClient") as MockClient:
         MockTM.side_effect = lambda t: MagicMock(github_token=t)
         MockClient.side_effect = lambda tm: MagicMock(name=f"client_{tm.github_token}")
-        mgr = AccountManager(accounts, strategy=strategy, quota_limit=quota_limit)
+        mgr = AccountManager(accounts, strategy=strategy, quota_limit=quota_limit,
+                             local_tracking=local_tracking)
     return mgr
 
 
@@ -151,6 +153,35 @@ class TestQuotaLimit:
         mgr = _make_manager(3, "round-robin")
         for a in mgr._accounts:
             assert a.premium_limit is None
+
+
+class TestLocalTracking:
+    def test_increments_usage_on_user_request(self):
+        mgr = _make_manager(2, "max-usage", local_tracking=True)
+        mgr.get_client("user")
+        assert mgr._accounts[0].premium_used == 1
+        mgr.get_client("user")
+        assert mgr._accounts[0].premium_used == 2
+
+    def test_does_not_increment_on_agent_request(self):
+        mgr = _make_manager(2, "max-usage", local_tracking=True)
+        mgr.get_client("user")  # premium_used = 1
+        mgr.get_client("agent")
+        assert mgr._accounts[0].premium_used == 1
+
+    def test_exhausts_at_quota_limit(self):
+        mgr = _make_manager(2, "max-usage", quota_limit=2, local_tracking=True)
+        mgr.get_client("user")  # 1
+        mgr.get_client("user")  # 2 → exhausted
+        assert mgr._accounts[0].exhausted is True
+        # Next user request should go to account 1
+        client = mgr.get_client("user")
+        assert client is mgr._accounts[1].client
+
+    def test_no_increment_without_local_tracking(self):
+        mgr = _make_manager(2, "round-robin", local_tracking=False)
+        mgr.get_client("user")
+        assert mgr._accounts[0].premium_used == 0
 
 
 class TestValidation:

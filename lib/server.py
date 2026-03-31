@@ -62,10 +62,14 @@ async def _lifespan(application: FastAPI):
             if ":" in entry:
                 token, username = entry.split(":", 1)
                 accounts.append((token, username))
-        strategy = os.environ.get("_COPILOT_ADAPTER_STRATEGY", "round-robin")
+        strategy = os.environ.get("_COPILOT_ADAPTER_STRATEGY", "max-usage")
         quota_limit_raw = os.environ.get("_COPILOT_ADAPTER_QUOTA_LIMIT", "")
         quota_limit = int(quota_limit_raw) if quota_limit_raw else None
-        account_mgr = AccountManager(accounts, strategy=strategy, quota_limit=quota_limit)
+        local_tracking = os.environ.get("_COPILOT_ADAPTER_LOCAL_TRACKING", "") == "1"
+        account_mgr = AccountManager(
+            accounts, strategy=strategy, quota_limit=quota_limit,
+            local_tracking=local_tracking,
+        )
 
         cors_raw = os.environ.get("_COPILOT_ADAPTER_CORS_ORIGINS", "")
         if cors_raw:
