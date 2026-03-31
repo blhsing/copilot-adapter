@@ -3,14 +3,14 @@
 Running the tests requires a valid GitHub Copilot session.  The first time you
 run the suite you will be prompted to authenticate via the GitHub device flow
 (a browser window opens automatically).  Subsequent runs reuse the cached
-token stored in ``~/.config/copilot-api/token.json``.
+token stored in ``~/.config/copilot-api/tokens.json``.
 """
 
 import pytest
 import pytest_asyncio
 
 from lib.adapters import AnthropicAdapter, GeminiAdapter, OpenAIAdapter
-from lib.auth import CopilotTokenManager, device_flow_login
+from lib.auth import CopilotTokenManager, device_flow_login, _validate_github_token
 from lib.client import CopilotClient
 
 
@@ -84,9 +84,12 @@ async def available_model(client: CopilotClient) -> str:
 # ---------------------------------------------------------------------------
 
 @pytest.fixture(scope="session")
-def test_app(token_manager: CopilotTokenManager):
+def test_app(github_token: str):
+    from lib.account_manager import AccountManager
     from lib.server import init_app
-    return init_app(token_manager)
+    username = _validate_github_token(github_token) or "test-user"
+    mgr = AccountManager([(github_token, username)])
+    return init_app(mgr)
 
 
 @pytest.fixture(scope="session")

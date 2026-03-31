@@ -10,6 +10,7 @@ import httpx
 
 GITHUB_CLIENT_ID = "Iv1.b507a08c87ecfe98"
 TOKEN_FILE = Path.home() / ".config" / "copilot-api" / "token.json"
+TOKENS_FILE = Path.home() / ".config" / "copilot-api" / "tokens.json"
 
 HEADERS_BASE = {
     "accept": "application/json",
@@ -20,57 +21,109 @@ HEADERS_BASE = {
 }
 
 
-def _save_github_token(token: str) -> None:
-    TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
-    TOKEN_FILE.write_text(json.dumps({"github_token": token}))
-
-
-def _load_github_token() -> str | None:
-    if TOKEN_FILE.exists():
-        data = json.loads(TOKEN_FILE.read_text())
-        return data.get("github_token")
+def _validate_github_token(token: str) -> str | None:
+    """Validate a GitHub token and return the username, or None if invalid."""
+    r = httpx.get(
+        "https://api.github.com/user",
+        headers={"authorization": f"token {token}", "accept": "application/json"},
+    )
+    if r.status_code == 200:
+        return r.json().get("login", "unknown")
     return None
 
 
-def resolve_github_token(explicit_token: str | None = None) -> str:
-    """Return a GitHub token using the first available source.
+def _save_github_tokens(accounts: list[dict]) -> None:
+    TOKENS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    TOKENS_FILE.write_text(json.dumps({"accounts": accounts}, indent=2))
 
-    Lookup order: *explicit_token* arg (which Click resolves from
-    ``--github-token`` flag or ``COPILOT_ADAPTER_GITHUB_TOKEN`` env var) >
-    ``GITHUB_TOKEN`` env var > cached token file > interactive device-flow
-    OAuth.
+
+def _load_github_tokens() -> list[dict]:
+    """Load cached accounts. Auto-migrates old single-token format."""
+    if TOKENS_FILE.exists():
+        data = json.loads(TOKENS_FILE.read_text())
+        return data.get("accounts", [])
+
+    # Migrate from old single-token format
+    if TOKEN_FILE.exists():
+        old_data = json.loads(TOKEN_FILE.read_text())
+        old_token = old_data.get("github_token")
+        if old_token:
+            username = _validate_github_token(old_token)
+            if username:
+                accounts = [{"github_token": old_token, "username": username}]
+                _save_github_tokens(accounts)
+                TOKEN_FILE.unlink()
+                return accounts
+        TOKEN_FILE.unlink()
+
+    return []
+
+
+def resolve_github_tokens(explicit_tokens: list[str] | None = None) -> list[tuple[str, str]]:
+    """Return a list of (token, username) tuples from all available sources.
+
+    Lookup order: *explicit_tokens* arg (from ``--github-token`` flags or
+    ``COPILOT_ADAPTER_GITHUB_TOKEN`` env var) > ``GITHUB_TOKEN`` env var >
+    cached token file > interactive device-flow OAuth.
+
+    Each token is validated. Duplicates (by token value) are removed.
     """
     import os
 
-    token = explicit_token or os.environ.get("GITHUB_TOKEN")
-    if token:
-        r = httpx.get(
-            "https://api.github.com/user",
-            headers={"authorization": f"token {token}", "accept": "application/json"},
-        )
-        if r.status_code == 200:
-            user = r.json().get("login", "unknown")
-            print(f"Authenticated as {user}")
-            return token
-        raise RuntimeError("Provided GitHub token is invalid or expired.")
+    seen_tokens: set[str] = set()
+    result: list[tuple[str, str]] = []
 
-    return device_flow_login()
+    def _add_token(token: str) -> bool:
+        token = token.strip()
+        if not token or token in seen_tokens:
+            return False
+        username = _validate_github_token(token)
+        if username:
+            seen_tokens.add(token)
+            result.append((token, username))
+            print(f"  Authenticated as {username}")
+            return True
+        else:
+            print(f"  Warning: token ending in ...{token[-4:]} is invalid, skipping")
+            return False
+
+    # 1. Explicit tokens from CLI flags
+    if explicit_tokens:
+        for t in explicit_tokens:
+            # Support comma-separated tokens in each value (for env var)
+            for part in t.split(","):
+                _add_token(part)
+
+    # 2. GITHUB_TOKEN env var fallback
+    if not result:
+        env_token = os.environ.get("GITHUB_TOKEN", "")
+        for part in env_token.split(","):
+            _add_token(part)
+
+    # 3. Cached device-flow tokens
+    if not result:
+        cached = _load_github_tokens()
+        for acct in cached:
+            _add_token(acct["github_token"])
+
+    # 4. Interactive device flow
+    if not result:
+        token = device_flow_login()
+        username = _validate_github_token(token)
+        if username:
+            result.append((token, username))
+
+    if not result:
+        raise RuntimeError("No valid GitHub tokens found.")
+
+    return result
 
 
 def device_flow_login() -> str:
-    """Run the GitHub device-flow OAuth and return a GitHub access token."""
-    existing = _load_github_token()
-    if existing:
-        # Verify the token is still valid
-        r = httpx.get(
-            "https://api.github.com/user",
-            headers={"authorization": f"token {existing}", "accept": "application/json"},
-        )
-        if r.status_code == 200:
-            user = r.json().get("login", "unknown")
-            print(f"Already authenticated as {user}")
-            return existing
+    """Run the GitHub device-flow OAuth and return a GitHub access token.
 
+    Appends the new account to the multi-token cache.
+    """
     # Step 1: Request device code
     r = httpx.post(
         "https://github.com/login/device/code",
@@ -122,17 +175,66 @@ def device_flow_login() -> str:
 
         token = body["access_token"]
         print(" done!")
-        _save_github_token(token)
+
+        # Add to cache (deduplicate by token)
+        username = _validate_github_token(token)
+        if username:
+            accounts = _load_github_tokens()
+            accounts = [a for a in accounts if a["github_token"] != token]
+            accounts.append({"github_token": token, "username": username})
+            _save_github_tokens(accounts)
+            print(f"Logged in as {username}")
+            _print_cached_accounts(accounts)
         return token
 
 
-def logout() -> None:
-    """Remove stored credentials."""
-    if TOKEN_FILE.exists():
-        TOKEN_FILE.unlink()
-        print("Logged out.")
-    else:
+def logout(username: str | None = None) -> None:
+    """Remove stored credentials.
+
+    If *username* is given, remove only that account. Otherwise remove all.
+    """
+    accounts = _load_github_tokens()
+    if not accounts:
         print("No stored credentials found.")
+        return
+
+    if username:
+        before = len(accounts)
+        accounts = [a for a in accounts if a["username"] != username]
+        if len(accounts) == before:
+            print(f"No cached account found for '{username}'.")
+            return
+        _save_github_tokens(accounts)
+        print(f"Removed account '{username}'.")
+        if accounts:
+            _print_cached_accounts(accounts)
+    else:
+        if TOKENS_FILE.exists():
+            TOKENS_FILE.unlink()
+        # Clean up old format too
+        if TOKEN_FILE.exists():
+            TOKEN_FILE.unlink()
+        print("Removed all stored credentials.")
+
+
+def list_accounts() -> list[dict]:
+    """Return cached accounts with validity status."""
+    accounts = _load_github_tokens()
+    result = []
+    for acct in accounts:
+        username = _validate_github_token(acct["github_token"])
+        result.append({
+            "username": acct["username"],
+            "valid": username is not None,
+        })
+    return result
+
+
+def _print_cached_accounts(accounts: list[dict]) -> None:
+    """Print a summary of cached accounts."""
+    print(f"\nCached accounts ({len(accounts)}):")
+    for acct in accounts:
+        print(f"  - {acct['username']}")
 
 
 class CopilotTokenManager:
