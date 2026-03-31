@@ -66,9 +66,10 @@ async def _lifespan(application: FastAPI):
         quota_limit_raw = os.environ.get("_COPILOT_ADAPTER_QUOTA_LIMIT", "")
         quota_limit = int(quota_limit_raw) if quota_limit_raw else None
         local_tracking = os.environ.get("_COPILOT_ADAPTER_LOCAL_TRACKING", "") == "1"
+        plan = os.environ.get("_COPILOT_ADAPTER_PLAN", "paid")
         account_mgr = AccountManager(
             accounts, strategy=strategy, quota_limit=quota_limit,
-            local_tracking=local_tracking,
+            local_tracking=local_tracking, plan=plan,
         )
 
         cors_raw = os.environ.get("_COPILOT_ADAPTER_CORS_ORIGINS", "")
@@ -160,7 +161,10 @@ async def handle_chat_completion(
                                     result = converter.feed(retry_line)
                                     if result:
                                         yield result
+                                account_mgr.record_usage(client, requested_model)
                                 return
+                        else:
+                            account_mgr.record_usage(client, requested_model)
 
                 result = converter.feed(line)
                 if result:
@@ -182,9 +186,11 @@ async def handle_chat_completion(
         )
         fallback = account_mgr.get_fallback_client(client)
         if fallback is not None:
-            resp = await fallback.chat_completions(openai_body, initiator=resolved)
+            client = fallback
+            resp = await client.chat_completions(openai_body, initiator=resolved)
             resp_data = resp.json()
 
+    account_mgr.record_usage(client, requested_model)
     return JSONResponse(
         content=adapter.convert_chat_response(resp_data, body),
         status_code=resp.status_code,
@@ -256,7 +262,10 @@ async def responses(request: Request):
                                     result = converter.feed(retry_line)
                                     if result:
                                         yield result
+                                account_mgr.record_usage(client, requested_model)
                                 return
+                        else:
+                            account_mgr.record_usage(client, requested_model)
                 result = converter.feed(line)
                 if result:
                     yield result
@@ -276,8 +285,10 @@ async def responses(request: Request):
         )
         fallback = account_mgr.get_fallback_client(client)
         if fallback is not None:
-            resp = await fallback.responses(body, initiator=initiator)
+            client = fallback
+            resp = await client.responses(body, initiator=initiator)
             resp_data = resp.json()
+    account_mgr.record_usage(client, requested_model)
     return JSONResponse(content=resp_data, status_code=resp.status_code)
 
 
@@ -391,7 +402,10 @@ async def gemini_stream_generate_content(model_id: str, request: Request):
                                 result = converter.feed(retry_line)
                                 if result:
                                     yield result
+                            account_mgr.record_usage(client, requested_model)
                             return
+                    else:
+                        account_mgr.record_usage(client, requested_model)
             result = converter.feed(line)
             if result:
                 yield result
