@@ -1,5 +1,7 @@
 """OpenAI-compatible API server that proxies to GitHub Copilot."""
 
+import json
+import logging
 import os
 from contextlib import asynccontextmanager
 
@@ -7,10 +9,11 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .adapters import AnthropicAdapter, FormatAdapter, GeminiAdapter, OpenAIAdapter
-from .auth import CopilotTokenManager
-from .client import CopilotClient
+from .account_manager import AccountManager
 
-client: CopilotClient | None = None
+logger = logging.getLogger(__name__)
+
+account_mgr: AccountManager | None = None
 openai_adapter = OpenAIAdapter()
 anthropic_adapter = AnthropicAdapter()
 
@@ -21,14 +24,48 @@ _STREAM_HEADERS = {
 }
 
 
+def _is_model_match(requested: str, responded: str) -> bool:
+    """Check if the response model plausibly matches the requested model.
+
+    Handles date-suffixed variants like ``gpt-4o-mini`` vs
+    ``gpt-4o-mini-2024-07-18``.
+    """
+    return (
+        requested == responded
+        or responded.startswith(requested)
+        or requested.startswith(responded)
+    )
+
+
+def _extract_model_from_sse_line(line: str) -> str | None:
+    """Try to extract the ``model`` field from an SSE data line."""
+    if not line.startswith("data: "):
+        return None
+    payload = line[6:].strip()
+    if payload == "[DONE]":
+        return None
+    try:
+        return json.loads(payload).get("model")
+    except (json.JSONDecodeError, AttributeError):
+        return None
+
+
 @asynccontextmanager
 async def _lifespan(application: FastAPI):
-    """Initialize the CopilotClient in each worker process on startup."""
-    global client
-    github_token = os.environ.get("_COPILOT_ADAPTER_GITHUB_TOKEN", "")
-    if github_token and client is None:
-        tm = CopilotTokenManager(github_token)
-        client = CopilotClient(tm)
+    """Initialize the AccountManager in each worker process on startup."""
+    global account_mgr
+    tokens_raw = os.environ.get("_COPILOT_ADAPTER_GITHUB_TOKENS", "")
+    if tokens_raw and account_mgr is None:
+        # Format: "token1:username1,token2:username2"
+        accounts = []
+        for entry in tokens_raw.split(","):
+            if ":" in entry:
+                token, username = entry.split(":", 1)
+                accounts.append((token, username))
+        strategy = os.environ.get("_COPILOT_ADAPTER_STRATEGY", "round-robin")
+        quota_limit_raw = os.environ.get("_COPILOT_ADAPTER_QUOTA_LIMIT", "")
+        quota_limit = int(quota_limit_raw) if quota_limit_raw else None
+        account_mgr = AccountManager(accounts, strategy=strategy, quota_limit=quota_limit)
 
         cors_raw = os.environ.get("_COPILOT_ADAPTER_CORS_ORIGINS", "")
         if cors_raw:
@@ -47,10 +84,10 @@ app = FastAPI(title="Copilot API", version="0.1.0", lifespan=_lifespan)
 
 
 def init_app(
-    tm: CopilotTokenManager, cors_origins: list[str] | None = None
+    mgr: AccountManager, cors_origins: list[str] | None = None
 ) -> FastAPI:
-    global client
-    client = CopilotClient(tm)
+    global account_mgr
+    account_mgr = mgr
 
     if cors_origins:
         from fastapi.middleware.cors import CORSMiddleware
@@ -79,17 +116,48 @@ async def handle_chat_completion(
 ):
     resolved = initiator or adapter.infer_initiator(body)
     openai_body = adapter.convert_chat_request(body)
+    requested_model = openai_body.get("model", "")
+    client = account_mgr.get_client(initiator=resolved)
 
     if adapter.is_streaming(body) or openai_body.get("stream"):
         converter = adapter.create_stream_converter(body)
 
         async def event_stream():
+            nonlocal client
+            first_chunk = True
             async for line in client.stream_chat_completions(
                 openai_body, initiator=resolved
             ):
                 if line.startswith("error:"):
                     yield converter.format_error(line)
                     return
+
+                # Check the first data chunk for model mismatch
+                if first_chunk:
+                    resp_model = _extract_model_from_sse_line(line)
+                    if resp_model is not None:
+                        first_chunk = False
+                        if not _is_model_match(requested_model, resp_model):
+                            logger.warning(
+                                "Model mismatch: requested %s, got %s — "
+                                "quota likely exhausted, switching account",
+                                requested_model, resp_model,
+                            )
+                            fallback = account_mgr.get_fallback_client(client)
+                            if fallback is not None:
+                                client = fallback
+                                converter = adapter.create_stream_converter(body)
+                                async for retry_line in client.stream_chat_completions(
+                                    openai_body, initiator=resolved
+                                ):
+                                    if retry_line.startswith("error:"):
+                                        yield converter.format_error(retry_line)
+                                        return
+                                    result = converter.feed(retry_line)
+                                    if result:
+                                        yield result
+                                return
+
                 result = converter.feed(line)
                 if result:
                     yield result
@@ -98,9 +166,23 @@ async def handle_chat_completion(
             event_stream(), media_type="text/event-stream", headers=_STREAM_HEADERS
         )
 
+    # Non-streaming
     resp = await client.chat_completions(openai_body, initiator=resolved)
+    resp_data = resp.json()
+    resp_model = resp_data.get("model", "")
+    if resp_model and not _is_model_match(requested_model, resp_model):
+        logger.warning(
+            "Model mismatch: requested %s, got %s — "
+            "quota likely exhausted, switching account",
+            requested_model, resp_model,
+        )
+        fallback = account_mgr.get_fallback_client(client)
+        if fallback is not None:
+            resp = await fallback.chat_completions(openai_body, initiator=resolved)
+            resp_data = resp.json()
+
     return JSONResponse(
-        content=adapter.convert_chat_response(resp.json(), body),
+        content=adapter.convert_chat_response(resp_data, body),
         status_code=resp.status_code,
     )
 
@@ -112,6 +194,7 @@ async def handle_chat_completion(
 @app.get("/v1/models")
 @app.get("/models")
 async def list_models():
+    client = account_mgr.get_client()
     resp = await client.list_models()
     return JSONResponse(
         content=openai_adapter.convert_models_response(resp.json()),
@@ -133,15 +216,43 @@ async def chat_completions(request: Request):
 async def responses(request: Request):
     body = await request.json()
     initiator = _get_initiator(request) or "user"
+    client = account_mgr.get_client(initiator=initiator)
+    requested_model = body.get("model", "")
 
     if body.get("stream"):
         converter = openai_adapter.create_stream_converter(body)
 
         async def event_stream():
+            nonlocal client
+            first_chunk = True
             async for line in client.stream_responses(body, initiator=initiator):
                 if line.startswith("error:"):
                     yield converter.format_error(line)
                     return
+                if first_chunk:
+                    resp_model = _extract_model_from_sse_line(line)
+                    if resp_model is not None:
+                        first_chunk = False
+                        if not _is_model_match(requested_model, resp_model):
+                            logger.warning(
+                                "Model mismatch: requested %s, got %s — "
+                                "quota likely exhausted, switching account",
+                                requested_model, resp_model,
+                            )
+                            fallback = account_mgr.get_fallback_client(client)
+                            if fallback is not None:
+                                client = fallback
+                                converter = openai_adapter.create_stream_converter(body)
+                                async for retry_line in client.stream_responses(
+                                    body, initiator=initiator
+                                ):
+                                    if retry_line.startswith("error:"):
+                                        yield converter.format_error(retry_line)
+                                        return
+                                    result = converter.feed(retry_line)
+                                    if result:
+                                        yield result
+                                return
                 result = converter.feed(line)
                 if result:
                     yield result
@@ -151,14 +262,28 @@ async def responses(request: Request):
         )
 
     resp = await client.responses(body, initiator=initiator)
-    return JSONResponse(content=resp.json(), status_code=resp.status_code)
+    resp_data = resp.json()
+    resp_model = resp_data.get("model", "")
+    if resp_model and not _is_model_match(requested_model, resp_model):
+        logger.warning(
+            "Model mismatch: requested %s, got %s — "
+            "quota likely exhausted, switching account",
+            requested_model, resp_model,
+        )
+        fallback = account_mgr.get_fallback_client(client)
+        if fallback is not None:
+            resp = await fallback.responses(body, initiator=initiator)
+            resp_data = resp.json()
+    return JSONResponse(content=resp_data, status_code=resp.status_code)
 
 
 @app.post("/v1/embeddings")
 @app.post("/embeddings")
 async def embeddings(request: Request):
     body = await request.json()
-    resp = await client.embeddings(body, initiator=_get_initiator(request) or "user")
+    initiator = _get_initiator(request) or "user"
+    client = account_mgr.get_client(initiator=initiator)
+    resp = await client.embeddings(body, initiator=initiator)
     try:
         content = resp.json()
     except Exception:
@@ -185,6 +310,7 @@ async def messages(request: Request):
 
 @app.get("/v1beta/models")
 async def gemini_list_models():
+    client = account_mgr.get_client()
     resp = await client.list_models()
     adapter = GeminiAdapter()
     return JSONResponse(
@@ -195,6 +321,7 @@ async def gemini_list_models():
 
 @app.get("/v1beta/models/{model_id}")
 async def gemini_get_model(model_id: str):
+    client = account_mgr.get_client()
     resp = await client.list_models()
     if resp.status_code != 200:
         return JSONResponse(content=resp.json(), status_code=resp.status_code)
@@ -224,15 +351,43 @@ async def gemini_stream_generate_content(model_id: str, request: Request):
     resolved = _get_initiator(request) or adapter.infer_initiator(body)
     openai_body = adapter.convert_chat_request(body)
     openai_body["stream"] = True
+    requested_model = openai_body.get("model", "")
+    client = account_mgr.get_client(initiator=resolved)
     converter = adapter.create_stream_converter(body)
 
     async def event_stream():
+        nonlocal client
+        first_chunk = True
         async for line in client.stream_chat_completions(
             openai_body, initiator=resolved
         ):
             if line.startswith("error:"):
                 yield converter.format_error(line)
                 return
+            if first_chunk:
+                resp_model = _extract_model_from_sse_line(line)
+                if resp_model is not None:
+                    first_chunk = False
+                    if not _is_model_match(requested_model, resp_model):
+                        logger.warning(
+                            "Model mismatch: requested %s, got %s — "
+                            "quota likely exhausted, switching account",
+                            requested_model, resp_model,
+                        )
+                        fallback = account_mgr.get_fallback_client(client)
+                        if fallback is not None:
+                            client = fallback
+                            converter = adapter.create_stream_converter(body)
+                            async for retry_line in client.stream_chat_completions(
+                                openai_body, initiator=resolved
+                            ):
+                                if retry_line.startswith("error:"):
+                                    yield converter.format_error(retry_line)
+                                    return
+                                result = converter.feed(retry_line)
+                                if result:
+                                    yield result
+                            return
             result = converter.feed(line)
             if result:
                 yield result

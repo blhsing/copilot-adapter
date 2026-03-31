@@ -14,16 +14,41 @@ def main():
 
 @main.command()
 def login():
-    """Authenticate with GitHub using the device flow."""
+    """Authenticate with GitHub using the device flow.
+
+    Each invocation adds a new account to the cache. Run multiple times
+    to add multiple accounts.
+    """
     from lib.auth import device_flow_login
     device_flow_login()
 
 
 @main.command()
-def logout():
+@click.option("--username", default=None,
+              help="Remove a specific account by GitHub username.")
+@click.option("--all", "remove_all", is_flag=True,
+              help="Remove all stored credentials.")
+def logout(username: str | None, remove_all: bool):
     """Remove stored credentials."""
     from lib.auth import logout as do_logout
-    do_logout()
+    if remove_all or not username:
+        do_logout()
+    else:
+        do_logout(username=username)
+
+
+@main.command()
+def accounts():
+    """List all cached device-flow accounts."""
+    from lib.auth import list_accounts
+    accts = list_accounts()
+    if not accts:
+        print("No cached accounts.")
+        return
+    print(f"Cached accounts ({len(accts)}):")
+    for acct in accts:
+        status = "valid" if acct["valid"] else "expired/invalid"
+        print(f"  - {acct['username']} ({status})")
 
 
 @main.command()
@@ -31,31 +56,44 @@ def logout():
               help="Host to bind to.")
 @click.option("--port", default=18080, type=int, envvar="COPILOT_ADAPTER_PORT",
               help="Port to bind to.")
-@click.option("--github-token", default=None, envvar="COPILOT_ADAPTER_GITHUB_TOKEN",
-              help="GitHub PAT or OAuth token. Falls back to COPILOT_ADAPTER_GITHUB_TOKEN env var, "
-                   "then cached token, then interactive device flow.")
+@click.option("--github-token", multiple=True, envvar="COPILOT_ADAPTER_GITHUB_TOKEN",
+              help="GitHub PAT (repeatable). Env var supports comma-separated values.")
 @click.option("--cors-origin", multiple=True, envvar="COPILOT_ADAPTER_CORS_ORIGIN",
               help="Allowed CORS origin (repeatable). Use '*' to allow all origins.")
 @click.option("--workers", default=_NUM_CPUS, type=int, envvar="COPILOT_ADAPTER_WORKERS",
               help=f"Number of worker processes (default: number of CPUs, {_NUM_CPUS}).")
-def serve(host: str, port: int, github_token: str | None, cors_origin: tuple[str, ...],
-          workers: int):
+@click.option("--strategy", default="max-usage",
+              type=click.Choice(["max-usage", "min-usage", "round-robin"]),
+              envvar="COPILOT_ADAPTER_STRATEGY",
+              help="Account rotation strategy (default: max-usage).")
+@click.option("--quota-limit", default=None, type=int,
+              envvar="COPILOT_ADAPTER_QUOTA_LIMIT",
+              help="Monthly premium request limit per account for proactive switching.")
+def serve(host: str, port: int, github_token: tuple[str, ...],
+          cors_origin: tuple[str, ...], workers: int, strategy: str,
+          quota_limit: int | None):
     """Start the OpenAI-compatible API server."""
     import uvicorn
 
-    from lib.auth import CopilotTokenManager, resolve_github_token
+    from lib.account_manager import AccountManager
+    from lib.auth import resolve_github_tokens
     from lib.server import init_app
 
-    github_token = resolve_github_token(github_token)
-    tm = CopilotTokenManager(github_token)
+    print("Resolving accounts...")
+    token_list = list(github_token) if github_token else None
+    accounts = resolve_github_tokens(token_list)
 
-    # Verify we can get a Copilot token
+    acct_mgr = AccountManager(accounts, strategy=strategy, quota_limit=quota_limit)
+
+    # Verify all accounts can get a Copilot token
     try:
-        tm.get_token()
+        acct_mgr.verify_all()
     except Exception as e:
         raise click.ClickException(f"Failed to get Copilot token: {e}")
 
-    print(f"\nStarting server on http://{host}:{port}")
+    n = len(accounts)
+    print(f"\nConfigured {n} account(s), strategy: {strategy}")
+    print(f"Starting server on http://{host}:{port}")
     print(f"  POST /v1/chat/completions                       (OpenAI)")
     print(f"  POST /v1/responses                              (OpenAI)")
     print(f"  POST /v1/messages                               (Anthropic)")
@@ -66,9 +104,13 @@ def serve(host: str, port: int, github_token: str | None, cors_origin: tuple[str
     print(f"  POST /v1/embeddings\n")
 
     if workers > 1:
-        import os
-        # Workers initialize via the lifespan event using this env var
-        os.environ["_COPILOT_ADAPTER_GITHUB_TOKEN"] = github_token
+        # Workers initialize via the lifespan event using env vars
+        # Format: "token1:username1,token2:username2"
+        pairs = [f"{t}:{u}" for t, u in accounts]
+        os.environ["_COPILOT_ADAPTER_GITHUB_TOKENS"] = ",".join(pairs)
+        os.environ["_COPILOT_ADAPTER_STRATEGY"] = strategy
+        if quota_limit is not None:
+            os.environ["_COPILOT_ADAPTER_QUOTA_LIMIT"] = str(quota_limit)
         if cors_origin:
             os.environ["_COPILOT_ADAPTER_CORS_ORIGINS"] = ",".join(cors_origin)
         uvicorn.run(
@@ -76,7 +118,7 @@ def serve(host: str, port: int, github_token: str | None, cors_origin: tuple[str
             workers=workers, log_level="info",
         )
     else:
-        application = init_app(tm, cors_origins=list(cors_origin) or None)
+        application = init_app(acct_mgr, cors_origins=list(cors_origin) or None)
         uvicorn.run(application, host=host, port=port, log_level="info")
 
 
