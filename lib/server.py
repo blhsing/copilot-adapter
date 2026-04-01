@@ -117,18 +117,18 @@ def _get_initiator(request: Request) -> str | None:
 
 
 async def handle_chat_completion(
-    adapter: FormatAdapter, body: dict, *, initiator: str | None = None
+    adapter: FormatAdapter, body: dict, *, request: Request | None = None, initiator: str | None = None
 ):
     resolved = initiator or adapter.infer_initiator(body)
     openai_body = adapter.convert_chat_request(body)
     requested_model = openai_body.get("model", "")
-    client = account_mgr.get_client(initiator=resolved)
+    client = await account_mgr.get_client(initiator=resolved)
 
     if adapter.is_streaming(body) or openai_body.get("stream"):
         converter = adapter.create_stream_converter(body)
 
         async def event_stream():
-            nonlocal client
+            nonlocal client, converter
             first_chunk = True
             async for line in client.stream_chat_completions(
                 openai_body, initiator=resolved
@@ -148,7 +148,7 @@ async def handle_chat_completion(
                                 "quota likely exhausted, switching account",
                                 requested_model, resp_model,
                             )
-                            fallback = account_mgr.get_fallback_client(client)
+                            fallback = await account_mgr.get_fallback_client(client)
                             if fallback is not None:
                                 client = fallback
                                 converter = adapter.create_stream_converter(body)
@@ -161,10 +161,10 @@ async def handle_chat_completion(
                                     result = converter.feed(retry_line)
                                     if result:
                                         yield result
-                                account_mgr.record_usage(client, requested_model)
+                                await account_mgr.record_usage(client, requested_model)
                                 return
                         else:
-                            account_mgr.record_usage(client, requested_model)
+                            await account_mgr.record_usage(client, requested_model)
 
                 result = converter.feed(line)
                 if result:
@@ -184,13 +184,13 @@ async def handle_chat_completion(
             "quota likely exhausted, switching account",
             requested_model, resp_model,
         )
-        fallback = account_mgr.get_fallback_client(client)
+        fallback = await account_mgr.get_fallback_client(client)
         if fallback is not None:
             client = fallback
             resp = await client.chat_completions(openai_body, initiator=resolved)
             resp_data = resp.json()
 
-    account_mgr.record_usage(client, requested_model)
+    await account_mgr.record_usage(client, requested_model)
     return JSONResponse(
         content=adapter.convert_chat_response(resp_data, body),
         status_code=resp.status_code,
@@ -204,7 +204,7 @@ async def handle_chat_completion(
 @app.get("/v1/models")
 @app.get("/models")
 async def list_models():
-    client = account_mgr.get_client()
+    client = await account_mgr.get_client()
     resp = await client.list_models()
     return JSONResponse(
         content=openai_adapter.convert_models_response(resp.json()),
@@ -217,7 +217,7 @@ async def list_models():
 async def chat_completions(request: Request):
     body = await request.json()
     return await handle_chat_completion(
-        openai_adapter, body, initiator=_get_initiator(request)
+        openai_adapter, body, request=request, initiator=_get_initiator(request)
     )
 
 
@@ -226,14 +226,14 @@ async def chat_completions(request: Request):
 async def responses(request: Request):
     body = await request.json()
     initiator = _get_initiator(request) or "user"
-    client = account_mgr.get_client(initiator=initiator)
+    client = await account_mgr.get_client(initiator=initiator)
     requested_model = body.get("model", "")
 
     if body.get("stream"):
         converter = openai_adapter.create_stream_converter(body)
 
         async def event_stream():
-            nonlocal client
+            nonlocal client, converter
             first_chunk = True
             async for line in client.stream_responses(body, initiator=initiator):
                 if line.startswith("error:"):
@@ -249,7 +249,7 @@ async def responses(request: Request):
                                 "quota likely exhausted, switching account",
                                 requested_model, resp_model,
                             )
-                            fallback = account_mgr.get_fallback_client(client)
+                            fallback = await account_mgr.get_fallback_client(client)
                             if fallback is not None:
                                 client = fallback
                                 converter = openai_adapter.create_stream_converter(body)
@@ -262,10 +262,10 @@ async def responses(request: Request):
                                     result = converter.feed(retry_line)
                                     if result:
                                         yield result
-                                account_mgr.record_usage(client, requested_model)
+                                await account_mgr.record_usage(client, requested_model)
                                 return
                         else:
-                            account_mgr.record_usage(client, requested_model)
+                            await account_mgr.record_usage(client, requested_model)
                 result = converter.feed(line)
                 if result:
                     yield result
@@ -283,12 +283,12 @@ async def responses(request: Request):
             "quota likely exhausted, switching account",
             requested_model, resp_model,
         )
-        fallback = account_mgr.get_fallback_client(client)
+        fallback = await account_mgr.get_fallback_client(client)
         if fallback is not None:
             client = fallback
             resp = await client.responses(body, initiator=initiator)
             resp_data = resp.json()
-    account_mgr.record_usage(client, requested_model)
+    await account_mgr.record_usage(client, requested_model)
     return JSONResponse(content=resp_data, status_code=resp.status_code)
 
 
@@ -297,7 +297,7 @@ async def responses(request: Request):
 async def embeddings(request: Request):
     body = await request.json()
     initiator = _get_initiator(request) or "user"
-    client = account_mgr.get_client(initiator=initiator)
+    client = await account_mgr.get_client(initiator=initiator)
     resp = await client.embeddings(body, initiator=initiator)
     try:
         content = resp.json()
@@ -325,7 +325,7 @@ async def messages(request: Request):
 
 @app.get("/v1beta/models")
 async def gemini_list_models():
-    client = account_mgr.get_client()
+    client = await account_mgr.get_client()
     resp = await client.list_models()
     adapter = GeminiAdapter()
     return JSONResponse(
@@ -336,7 +336,7 @@ async def gemini_list_models():
 
 @app.get("/v1beta/models/{model_id}")
 async def gemini_get_model(model_id: str):
-    client = account_mgr.get_client()
+    client = await account_mgr.get_client()
     resp = await client.list_models()
     if resp.status_code != 200:
         return JSONResponse(content=resp.json(), status_code=resp.status_code)
@@ -367,11 +367,11 @@ async def gemini_stream_generate_content(model_id: str, request: Request):
     openai_body = adapter.convert_chat_request(body)
     openai_body["stream"] = True
     requested_model = openai_body.get("model", "")
-    client = account_mgr.get_client(initiator=resolved)
+    client = await account_mgr.get_client(initiator=resolved)
     converter = adapter.create_stream_converter(body)
 
     async def event_stream():
-        nonlocal client
+        nonlocal client, converter
         first_chunk = True
         async for line in client.stream_chat_completions(
             openai_body, initiator=resolved
@@ -406,10 +406,10 @@ async def gemini_stream_generate_content(model_id: str, request: Request):
                                 result = converter.feed(retry_line)
                                 if result:
                                     yield result
-                            account_mgr.record_usage(client, requested_model)
+                            await account_mgr.record_usage(client, requested_model)
                             return
                     else:
-                        account_mgr.record_usage(client, requested_model)
+                        await account_mgr.record_usage(client, requested_model)
             result = converter.feed(line)
             if result:
                 yield result
