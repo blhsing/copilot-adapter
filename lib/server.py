@@ -199,6 +199,14 @@ async def handle_chat_completion(
                 client = fallback
                 continue
             # All accounts exhausted, return the 429
+
+        if resp.status_code != 200:
+            try:
+                content = resp.json()
+            except Exception:
+                content = {"error": {"message": resp.text}}
+            return JSONResponse(content=content, status_code=resp.status_code)
+
         resp_data = resp.json()
         resp_model = resp_data.get("model", "")
         if resp_model and not _is_model_match(requested_model, resp_model):
@@ -317,6 +325,14 @@ async def responses(request: Request):
             if fallback is not None:
                 client = fallback
                 continue
+
+        if resp.status_code != 200:
+            try:
+                content = resp.json()
+            except Exception:
+                content = {"error": {"message": resp.text}}
+            return JSONResponse(content=content, status_code=resp.status_code)
+
         resp_data = resp.json()
         resp_model = resp_data.get("model", "")
         if resp_model and not _is_model_match(requested_model, resp_model):
