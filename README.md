@@ -180,6 +180,9 @@ All CLI options can be set via environment variables:
 | `--quota-limit` | `COPILOT_ADAPTER_QUOTA_LIMIT` | per plan |
 | `--local-tracking` | `COPILOT_ADAPTER_LOCAL_TRACKING` | off |
 | `--plan` | `COPILOT_ADAPTER_PLAN` | `pro` |
+| `--log-level` | `COPILOT_ADAPTER_LOG_LEVEL` | `info` |
+
+Set `NO_COLOR=1` to disable colored log output. Colors are auto-detected on Windows (requires Windows Terminal or VT-enabled console).
 
 `GITHUB_TOKEN` is also accepted as a fallback for the GitHub token. Multiple tokens can be comma-separated in `COPILOT_ADAPTER_GITHUB_TOKEN` or `GITHUB_TOKEN`.
 
