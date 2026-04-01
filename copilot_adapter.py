@@ -2,6 +2,7 @@
 
 import json
 import os
+import sys
 from pathlib import Path
 
 import click
@@ -9,6 +10,27 @@ import click
 _NUM_CPUS = os.cpu_count() or 1
 _DEFAULT_CONFIG = Path.home() / ".copilot-adapter.json"
 _VALID_PLANS = ("free", "pro", "pro+", "business", "enterprise")
+
+
+def _supports_color() -> bool:
+    """Detect whether the terminal supports ANSI color sequences."""
+    if not hasattr(sys.stderr, "isatty") or not sys.stderr.isatty():
+        return False
+    if os.environ.get("NO_COLOR"):
+        return False
+    if sys.platform == "win32":
+        # Check if the Windows console has VT processing enabled
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.GetStdHandle(-12)  # STD_ERROR_HANDLE
+            mode = ctypes.c_ulong()
+            if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+                return bool(mode.value & 0x0004)  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
+            return False
+        except Exception:
+            return False
+    return True
 
 
 def _load_config(path: str | None) -> dict:
@@ -168,7 +190,7 @@ def serve(config_path: str | None, host: str | None, port: int | None,
     strategy = strategy or cfg.get("strategy", "max-usage")
     quota_limit = quota_limit if quota_limit is not None else cfg.get("quota_limit")
     plan = plan or cfg.get("plan", "pro")
-    log_level = log_level or cfg.get("log_level", "warning")
+    log_level = log_level or cfg.get("log_level", "info")
     if not local_tracking:
         local_tracking = cfg.get("local_tracking", False)
     if not cors_origin:
@@ -279,13 +301,25 @@ def serve(config_path: str | None, host: str | None, port: int | None,
         os.environ["_COPILOT_ADAPTER_PLAN"] = plan
         if cors_origin:
             os.environ["_COPILOT_ADAPTER_CORS_ORIGINS"] = ",".join(cors_origin)
+
+        # Custom log config to suppress repetitive per-worker lifespan messages
+        from uvicorn.config import LOGGING_CONFIG
+        LOGGING_CONFIG["filters"] = {
+            "no_lifespan": {"()": "lib.logging.LifespanFilter"},
+        }
+        LOGGING_CONFIG["handlers"]["default"].setdefault("filters", [])
+        if "no_lifespan" not in LOGGING_CONFIG["handlers"]["default"]["filters"]:
+            LOGGING_CONFIG["handlers"]["default"]["filters"].append("no_lifespan")
+
         uvicorn.run(
             "lib.server:app", host=host, port=port,
             workers=workers, log_level=log_level,
+            use_colors=_supports_color(),
         )
     else:
         application = init_app(acct_mgr, cors_origins=list(cors_origin) or None)
-        uvicorn.run(application, host=host, port=port, log_level=log_level)
+        uvicorn.run(application, host=host, port=port, log_level=log_level,
+                    use_colors=_supports_color())
 
 
 if __name__ == "__main__":
