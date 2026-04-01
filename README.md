@@ -89,14 +89,17 @@ python copilot_adapter.py serve --github-token ghp_aaa --github-token ghp_bbb
 export COPILOT_ADAPTER_GITHUB_TOKEN=ghp_aaa,ghp_bbb
 python copilot_adapter.py serve
 
-# List cached accounts
+# List cached accounts (shows plan, quota, and usage)
 python copilot_adapter.py accounts
+
+# Add a PAT to the cache (with optional plan/quota)
+python copilot_adapter.py accounts --add ghp_xxx --plan pro --quota-limit 300
 
 # Update plan/quota for a cached account
 python copilot_adapter.py accounts --update octocat --plan pro+ --quota-limit 1500
 
-# Remove a specific account
-python copilot_adapter.py logout --username octocat
+# Remove a cached account
+python copilot_adapter.py accounts --remove octocat
 
 # Remove all accounts
 python copilot_adapter.py logout --all
@@ -115,6 +118,8 @@ Agent-initiated requests (tool-use follow-ups) always stay on the same account a
 **Quota exhaustion detection**: When a Copilot account's premium request quota is exhausted, GitHub silently downgrades the response to a free fallback model (e.g. GPT-4.1) instead of returning an error. The server detects this by comparing the model in the response against the model that was requested — if they don't match, it marks the account as exhausted and automatically retries the request with the next available account. This works for both streaming and non-streaming requests.
 
 For proactive switching *before* hitting the limit, set `--quota-limit N` or let it default from the plan. By default the server periodically checks each account's usage via the GitHub billing API. If this server is the only consumer of the quota, add `--local-tracking` to count requests in-memory instead — this eliminates all billing API calls and gives instant, accurate tracking without network overhead. Local tracking applies each model's premium request multiplier (e.g. Claude Opus 4.6 costs 3x, GPT-4o costs 0x on paid plans). These defaults can be overridden per account — see [Per-account plan and quota](#per-account-plan-and-quota).
+
+> **Note:** The GitHub billing API requires a PAT with the `copilot` scope. Device-flow tokens (from `copilot_adapter.py login`) cannot access billing data. If you use `min-usage` with device-flow accounts, add `--local-tracking` — otherwise the server cannot determine actual usage and all accounts will appear to have zero usage. The `max-usage` and `round-robin` strategies are unaffected since they don't rely on billing data to select accounts.
 
 **Supported plans** (`--plan`):
 

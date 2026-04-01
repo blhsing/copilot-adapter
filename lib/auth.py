@@ -288,6 +288,45 @@ def fetch_usage(token: str, username: str) -> float | None:
     return None
 
 
+def add_account(token: str, *, plan: str | None = None,
+                quota_limit: int | None = None) -> dict | None:
+    """Validate a PAT and add it to the cached accounts.
+
+    Returns a dict with username/plan/quota_limit on success, None if invalid.
+    """
+    from .account_manager import PLAN_QUOTAS
+
+    username = _validate_github_token(token)
+    if not username:
+        return None
+
+    plan = plan or "pro"
+    if quota_limit is None:
+        quota_limit = PLAN_QUOTAS.get(plan, 300)
+
+    accounts = _load_github_tokens()
+    accounts = [a for a in accounts if a["github_token"] != token]
+    accounts.append({
+        "github_token": token, "username": username,
+        "plan": plan, "quota_limit": quota_limit,
+    })
+    _save_github_tokens(accounts)
+    return {"username": username, "plan": plan, "quota_limit": quota_limit}
+
+
+def remove_account(username: str) -> bool:
+    """Remove a cached account by username.
+
+    Returns True if the account was found and removed, False otherwise.
+    """
+    accounts = _load_github_tokens()
+    filtered = [a for a in accounts if a["username"] != username]
+    if len(filtered) == len(accounts):
+        return False
+    _save_github_tokens(filtered)
+    return True
+
+
 def update_account(username: str, *, plan: str | None = None,
                    quota_limit: int | None = None) -> bool:
     """Update plan and/or quota_limit for a cached account by username.
