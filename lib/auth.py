@@ -245,7 +245,7 @@ def logout(username: str | None = None) -> None:
 
 
 def list_accounts() -> list[dict]:
-    """Return cached accounts with validity status."""
+    """Return cached accounts with validity status, plan, and quota."""
     accounts = _load_github_tokens()
     result = []
     for acct in accounts:
@@ -253,8 +253,31 @@ def list_accounts() -> list[dict]:
         result.append({
             "username": acct["username"],
             "valid": username is not None,
+            "plan": acct.get("plan"),
+            "quota_limit": acct.get("quota_limit"),
         })
     return result
+
+
+def update_account(username: str, *, plan: str | None = None,
+                   quota_limit: int | None = None) -> bool:
+    """Update plan and/or quota_limit for a cached account by username.
+
+    Returns True if the account was found and updated, False otherwise.
+    """
+    accounts = _load_github_tokens()
+    found = False
+    for acct in accounts:
+        if acct["username"] == username:
+            if plan is not None:
+                acct["plan"] = plan
+            if quota_limit is not None:
+                acct["quota_limit"] = quota_limit
+            found = True
+            break
+    if found:
+        _save_github_tokens(accounts)
+    return found
 
 
 def _print_cached_accounts(accounts: list[dict]) -> None:
