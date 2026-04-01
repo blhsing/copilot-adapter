@@ -216,12 +216,22 @@ class AccountManager:
                     break
 
     async def get_fallback_client(self, failed_client: CopilotClient) -> CopilotClient | None:
-        """Return the next non-exhausted client after marking *failed_client* exhausted."""
-        await self.mark_exhausted(failed_client)
+        """Return the next non-exhausted client after marking *failed_client* exhausted.
+
+        If no other accounts are available, returns ``None`` *without* marking
+        the current account exhausted — so single-account setups keep working.
+        """
         async with self._lock:
-            available = [a for a in self._accounts if not a.exhausted]
+            available = [a for a in self._accounts
+                         if not a.exhausted and a.client is not failed_client]
             if not available:
                 return None
+            # Only mark the failed account now that we know there's a fallback
+            for acct in self._accounts:
+                if acct.client is failed_client:
+                    acct.exhausted = True
+                    logger.warning("Account %s marked as exhausted", acct.username)
+                    break
             return available[0].client
 
     async def refresh_quota(self, acct: AccountInfo) -> None:

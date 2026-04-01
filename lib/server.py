@@ -121,6 +121,11 @@ def _get_initiator(request: Request) -> str | None:
     return request.headers.get("x-initiator")
 
 
+def _is_rate_limit_error(line: str) -> bool:
+    """Check if an SSE error line indicates a 429 rate limit."""
+    return line.startswith("error: 429")
+
+
 async def handle_chat_completion(
     adapter: FormatAdapter, body: dict, *, request: Request | None = None, initiator: str | None = None
 ):
@@ -134,66 +139,79 @@ async def handle_chat_completion(
 
         async def event_stream():
             nonlocal client, converter
-            first_chunk = True
-            async for line in client.stream_chat_completions(
-                openai_body, initiator=resolved
-            ):
-                if line.startswith("error:"):
-                    yield converter.format_error(line)
-                    return
-
-                # Check the first data chunk for model mismatch
-                if first_chunk:
-                    resp_model = _extract_model_from_sse_line(line)
-                    if resp_model is not None:
-                        first_chunk = False
-                        if not _is_model_match(requested_model, resp_model):
+            while True:
+                first_chunk = True
+                needs_retry = False
+                async for line in client.stream_chat_completions(
+                    openai_body, initiator=resolved
+                ):
+                    if line.startswith("error:"):
+                        if _is_rate_limit_error(line):
                             logger.warning(
-                                "Model mismatch: requested %s, got %s — "
-                                "quota likely exhausted, switching account",
-                                requested_model, resp_model,
+                                "Rate limited on account, switching account"
                             )
                             fallback = await account_mgr.get_fallback_client(client)
                             if fallback is not None:
                                 client = fallback
                                 converter = adapter.create_stream_converter(body)
-                                async for retry_line in client.stream_chat_completions(
-                                    openai_body, initiator=resolved
-                                ):
-                                    if retry_line.startswith("error:"):
-                                        yield converter.format_error(retry_line)
-                                        return
-                                    result = converter.feed(retry_line)
-                                    if result:
-                                        yield result
-                                await account_mgr.record_usage(client, requested_model)
-                                return
-                        else:
-                            await account_mgr.record_usage(client, requested_model)
+                                needs_retry = True
+                                break
+                        yield converter.format_error(line)
+                        return
 
-                result = converter.feed(line)
-                if result:
-                    yield result
+                    if first_chunk:
+                        resp_model = _extract_model_from_sse_line(line)
+                        if resp_model is not None:
+                            first_chunk = False
+                            if not _is_model_match(requested_model, resp_model):
+                                logger.warning(
+                                    "Model mismatch: requested %s, got %s — "
+                                    "quota likely exhausted, switching account",
+                                    requested_model, resp_model,
+                                )
+                                fallback = await account_mgr.get_fallback_client(client)
+                                if fallback is not None:
+                                    client = fallback
+                                    converter = adapter.create_stream_converter(body)
+                                    needs_retry = True
+                                    break
+                            else:
+                                await account_mgr.record_usage(client, requested_model)
+
+                    result = converter.feed(line)
+                    if result:
+                        yield result
+
+                if not needs_retry:
+                    return
 
         return StreamingResponse(
             event_stream(), media_type="text/event-stream", headers=_STREAM_HEADERS
         )
 
-    # Non-streaming
-    resp = await client.chat_completions(openai_body, initiator=resolved)
-    resp_data = resp.json()
-    resp_model = resp_data.get("model", "")
-    if resp_model and not _is_model_match(requested_model, resp_model):
-        logger.warning(
-            "Model mismatch: requested %s, got %s — "
-            "quota likely exhausted, switching account",
-            requested_model, resp_model,
-        )
-        fallback = await account_mgr.get_fallback_client(client)
-        if fallback is not None:
-            client = fallback
-            resp = await client.chat_completions(openai_body, initiator=resolved)
-            resp_data = resp.json()
+    # Non-streaming — retry loop for 429 and model mismatch
+    while True:
+        resp = await client.chat_completions(openai_body, initiator=resolved)
+        if resp.status_code == 429:
+            logger.warning("Rate limited on account, switching account")
+            fallback = await account_mgr.get_fallback_client(client)
+            if fallback is not None:
+                client = fallback
+                continue
+            # All accounts exhausted, return the 429
+        resp_data = resp.json()
+        resp_model = resp_data.get("model", "")
+        if resp_model and not _is_model_match(requested_model, resp_model):
+            logger.warning(
+                "Model mismatch: requested %s, got %s — "
+                "quota likely exhausted, switching account",
+                requested_model, resp_model,
+            )
+            fallback = await account_mgr.get_fallback_client(client)
+            if fallback is not None:
+                client = fallback
+                continue
+        break
 
     await account_mgr.record_usage(client, requested_model)
     return JSONResponse(
@@ -210,7 +228,15 @@ async def handle_chat_completion(
 @app.get("/models")
 async def list_models():
     client = await account_mgr.get_client()
-    resp = await client.list_models()
+    while True:
+        resp = await client.list_models()
+        if resp.status_code == 429:
+            logger.warning("Rate limited on account, switching account")
+            fallback = await account_mgr.get_fallback_client(client)
+            if fallback is not None:
+                client = fallback
+                continue
+        break
     return JSONResponse(
         content=openai_adapter.convert_models_response(resp.json()),
         status_code=resp.status_code,
@@ -239,60 +265,71 @@ async def responses(request: Request):
 
         async def event_stream():
             nonlocal client, converter
-            first_chunk = True
-            async for line in client.stream_responses(body, initiator=initiator):
-                if line.startswith("error:"):
-                    yield converter.format_error(line)
-                    return
-                if first_chunk:
-                    resp_model = _extract_model_from_sse_line(line)
-                    if resp_model is not None:
-                        first_chunk = False
-                        if not _is_model_match(requested_model, resp_model):
-                            logger.warning(
-                                "Model mismatch: requested %s, got %s — "
-                                "quota likely exhausted, switching account",
-                                requested_model, resp_model,
-                            )
+            while True:
+                first_chunk = True
+                needs_retry = False
+                async for line in client.stream_responses(body, initiator=initiator):
+                    if line.startswith("error:"):
+                        if _is_rate_limit_error(line):
+                            logger.warning("Rate limited on account, switching account")
                             fallback = await account_mgr.get_fallback_client(client)
                             if fallback is not None:
                                 client = fallback
                                 converter = openai_adapter.create_stream_converter(body)
-                                async for retry_line in client.stream_responses(
-                                    body, initiator=initiator
-                                ):
-                                    if retry_line.startswith("error:"):
-                                        yield converter.format_error(retry_line)
-                                        return
-                                    result = converter.feed(retry_line)
-                                    if result:
-                                        yield result
+                                needs_retry = True
+                                break
+                        yield converter.format_error(line)
+                        return
+                    if first_chunk:
+                        resp_model = _extract_model_from_sse_line(line)
+                        if resp_model is not None:
+                            first_chunk = False
+                            if not _is_model_match(requested_model, resp_model):
+                                logger.warning(
+                                    "Model mismatch: requested %s, got %s — "
+                                    "quota likely exhausted, switching account",
+                                    requested_model, resp_model,
+                                )
+                                fallback = await account_mgr.get_fallback_client(client)
+                                if fallback is not None:
+                                    client = fallback
+                                    converter = openai_adapter.create_stream_converter(body)
+                                    needs_retry = True
+                                    break
+                            else:
                                 await account_mgr.record_usage(client, requested_model)
-                                return
-                        else:
-                            await account_mgr.record_usage(client, requested_model)
-                result = converter.feed(line)
-                if result:
-                    yield result
+                    result = converter.feed(line)
+                    if result:
+                        yield result
+                if not needs_retry:
+                    return
 
         return StreamingResponse(
             event_stream(), media_type="text/event-stream", headers=_STREAM_HEADERS
         )
 
-    resp = await client.responses(body, initiator=initiator)
-    resp_data = resp.json()
-    resp_model = resp_data.get("model", "")
-    if resp_model and not _is_model_match(requested_model, resp_model):
-        logger.warning(
-            "Model mismatch: requested %s, got %s — "
-            "quota likely exhausted, switching account",
-            requested_model, resp_model,
-        )
-        fallback = await account_mgr.get_fallback_client(client)
-        if fallback is not None:
-            client = fallback
-            resp = await client.responses(body, initiator=initiator)
-            resp_data = resp.json()
+    # Non-streaming — retry loop for 429 and model mismatch
+    while True:
+        resp = await client.responses(body, initiator=initiator)
+        if resp.status_code == 429:
+            logger.warning("Rate limited on account, switching account")
+            fallback = await account_mgr.get_fallback_client(client)
+            if fallback is not None:
+                client = fallback
+                continue
+        resp_data = resp.json()
+        resp_model = resp_data.get("model", "")
+        if resp_model and not _is_model_match(requested_model, resp_model):
+            logger.warning(
+                "Model mismatch: requested %s, got %s — "
+                "quota likely exhausted, switching account",
+                requested_model, resp_model,
+            )
+            fallback = await account_mgr.get_fallback_client(client)
+            if fallback is not None:
+                client = fallback
+                continue
+        break
     await account_mgr.record_usage(client, requested_model)
     return JSONResponse(content=resp_data, status_code=resp.status_code)
 
@@ -303,7 +340,15 @@ async def embeddings(request: Request):
     body = await request.json()
     initiator = _get_initiator(request) or "user"
     client = await account_mgr.get_client(initiator=initiator)
-    resp = await client.embeddings(body, initiator=initiator)
+    while True:
+        resp = await client.embeddings(body, initiator=initiator)
+        if resp.status_code == 429:
+            logger.warning("Rate limited on account, switching account")
+            fallback = await account_mgr.get_fallback_client(client)
+            if fallback is not None:
+                client = fallback
+                continue
+        break
     try:
         content = resp.json()
     except Exception:
@@ -331,7 +376,15 @@ async def messages(request: Request):
 @app.get("/v1beta/models")
 async def gemini_list_models():
     client = await account_mgr.get_client()
-    resp = await client.list_models()
+    while True:
+        resp = await client.list_models()
+        if resp.status_code == 429:
+            logger.warning("Rate limited on account, switching account")
+            fallback = await account_mgr.get_fallback_client(client)
+            if fallback is not None:
+                client = fallback
+                continue
+        break
     adapter = GeminiAdapter()
     return JSONResponse(
         content=adapter.convert_models_response(resp.json()),
@@ -342,7 +395,15 @@ async def gemini_list_models():
 @app.get("/v1beta/models/{model_id}")
 async def gemini_get_model(model_id: str):
     client = await account_mgr.get_client()
-    resp = await client.list_models()
+    while True:
+        resp = await client.list_models()
+        if resp.status_code == 429:
+            logger.warning("Rate limited on account, switching account")
+            fallback = await account_mgr.get_fallback_client(client)
+            if fallback is not None:
+                client = fallback
+                continue
+        break
     if resp.status_code != 200:
         return JSONResponse(content=resp.json(), status_code=resp.status_code)
     adapter = GeminiAdapter(model_id)
@@ -377,47 +438,48 @@ async def gemini_stream_generate_content(model_id: str, request: Request):
 
     async def event_stream():
         nonlocal client, converter
-        first_chunk = True
-        async for line in client.stream_chat_completions(
-            openai_body, initiator=resolved
-        ):
-            if await request.is_disconnected():
-                return
-            if line.startswith("error:"):
-                yield converter.format_error(line)
-                return
-            if first_chunk:
-                resp_model = _extract_model_from_sse_line(line)
-                if resp_model is not None:
-                    first_chunk = False
-                    if not _is_model_match(requested_model, resp_model):
-                        logger.warning(
-                            "Model mismatch: requested %s, got %s — "
-                            "quota likely exhausted, switching account",
-                            requested_model, resp_model,
-                        )
+        while True:
+            first_chunk = True
+            needs_retry = False
+            async for line in client.stream_chat_completions(
+                openai_body, initiator=resolved
+            ):
+                if await request.is_disconnected():
+                    return
+                if line.startswith("error:"):
+                    if _is_rate_limit_error(line):
+                        logger.warning("Rate limited on account, switching account")
                         fallback = await account_mgr.get_fallback_client(client)
                         if fallback is not None:
                             client = fallback
                             converter = adapter.create_stream_converter(body)
-                            async for retry_line in client.stream_chat_completions(
-                                openai_body, initiator=resolved
-                            ):
-                                if await request.is_disconnected():
-                                    return
-                                if retry_line.startswith("error:"):
-                                    yield converter.format_error(retry_line)
-                                    return
-                                result = converter.feed(retry_line)
-                                if result:
-                                    yield result
+                            needs_retry = True
+                            break
+                    yield converter.format_error(line)
+                    return
+                if first_chunk:
+                    resp_model = _extract_model_from_sse_line(line)
+                    if resp_model is not None:
+                        first_chunk = False
+                        if not _is_model_match(requested_model, resp_model):
+                            logger.warning(
+                                "Model mismatch: requested %s, got %s — "
+                                "quota likely exhausted, switching account",
+                                requested_model, resp_model,
+                            )
+                            fallback = await account_mgr.get_fallback_client(client)
+                            if fallback is not None:
+                                client = fallback
+                                converter = adapter.create_stream_converter(body)
+                                needs_retry = True
+                                break
+                        else:
                             await account_mgr.record_usage(client, requested_model)
-                            return
-                    else:
-                        await account_mgr.record_usage(client, requested_model)
-            result = converter.feed(line)
-            if result:
-                yield result
+                result = converter.feed(line)
+                if result:
+                    yield result
+            if not needs_retry:
+                return
 
     return StreamingResponse(
         event_stream(), media_type="text/event-stream", headers=_STREAM_HEADERS
