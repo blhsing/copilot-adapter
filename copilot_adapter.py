@@ -107,7 +107,7 @@ def logout(username: str | None, remove_all: bool):
 def accounts(update_username: str | None, update_plan: str | None,
              update_quota: int | None):
     """List all cached device-flow accounts, or update one with --update."""
-    from lib.auth import list_accounts, update_account
+    from lib.auth import fetch_usage, list_accounts, update_account
 
     if update_username:
         if update_plan is None and update_quota is None:
@@ -131,7 +131,9 @@ def accounts(update_username: str | None, update_plan: str | None,
         plan = acct.get("plan") or "unset"
         quota = acct.get("quota_limit")
         quota_str = str(quota) if quota is not None else "unset"
-        print(f"  - {acct['username']} ({status}, plan: {plan}, quota: {quota_str})")
+        usage = fetch_usage(acct["token"], acct["username"]) if acct["valid"] else None
+        usage_str = f"{usage:.0f}" if usage is not None else "?"
+        print(f"  - {acct['username']} ({status}, plan: {plan}, usage: {usage_str}/{quota_str})")
 
 
 @main.command()
