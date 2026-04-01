@@ -132,6 +132,10 @@ async def handle_chat_completion(
     resolved = initiator or adapter.infer_initiator(body)
     openai_body = adapter.convert_chat_request(body)
     requested_model = openai_body.get("model", "")
+
+    billed_status = "yes" if resolved == "user" else "no"
+    logger.info("Chat completion requested by %s (billed: %s, model: %s)", resolved, billed_status, requested_model)
+
     client = await account_mgr.get_client(initiator=resolved)
 
     if adapter.is_streaming(body) or openai_body.get("stream"):
@@ -201,6 +205,7 @@ async def handle_chat_completion(
             # All accounts exhausted, return the 429
 
         if resp.status_code != 200:
+            logger.error("API error %s: %s", resp.status_code, resp.text)
             try:
                 content = resp.json()
             except Exception:
@@ -265,8 +270,12 @@ async def chat_completions(request: Request):
 async def responses(request: Request):
     body = await request.json()
     initiator = _get_initiator(request) or "user"
-    client = await account_mgr.get_client(initiator=initiator)
     requested_model = body.get("model", "")
+
+    billed_status = "yes" if initiator == "user" else "no"
+    logger.info("Responses requested by %s (billed: %s, model: %s)", initiator, billed_status, requested_model)
+
+    client = await account_mgr.get_client(initiator=initiator)
 
     if body.get("stream"):
         converter = openai_adapter.create_stream_converter(body)
@@ -327,6 +336,7 @@ async def responses(request: Request):
                 continue
 
         if resp.status_code != 200:
+            logger.error("API error %s: %s", resp.status_code, resp.text)
             try:
                 content = resp.json()
             except Exception:
@@ -369,6 +379,8 @@ async def embeddings(request: Request):
         content = resp.json()
     except Exception:
         content = {"error": {"message": resp.text}}
+    if resp.status_code != 200:
+        logger.error("API error %s: %s", resp.status_code, resp.text)
     return JSONResponse(content=content, status_code=resp.status_code)
 
 

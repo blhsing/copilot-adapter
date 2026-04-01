@@ -311,6 +311,11 @@ def serve(config_path: str | None, host: str | None, port: int | None,
     print(f"  GET  /v1beta/models")
     print(f"  POST /v1/embeddings\n")
 
+    # Configure Uvicorn logging format to include timestamps
+    from uvicorn.config import LOGGING_CONFIG
+    LOGGING_CONFIG["formatters"]["default"]["fmt"] = "%(asctime)s - %(levelprefix)s %(message)s"
+    LOGGING_CONFIG["formatters"]["access"]["fmt"] = '%(asctime)s - %(levelprefix)s %(client_addr)s - "%(request_line)s" %(status_code)s'
+
     if workers > 1:
         # Workers initialize via the lifespan event using env vars
         # Format: "token1:username1:plan1:quota1:usage1,..."
