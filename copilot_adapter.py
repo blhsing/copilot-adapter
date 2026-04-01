@@ -75,9 +75,30 @@ def logout(username: str | None, remove_all: bool):
 
 
 @main.command()
-def accounts():
-    """List all cached device-flow accounts."""
-    from lib.auth import list_accounts
+@click.option("--update", "update_username", default=None,
+              help="Update plan/quota for a cached account by username.")
+@click.option("--plan", "update_plan", default=None,
+              type=click.Choice(list(_VALID_PLANS)),
+              help="Set the Copilot plan for the account.")
+@click.option("--quota-limit", "update_quota", default=None, type=int,
+              help="Set the monthly premium request quota for the account.")
+def accounts(update_username: str | None, update_plan: str | None,
+             update_quota: int | None):
+    """List all cached device-flow accounts, or update one with --update."""
+    from lib.auth import list_accounts, update_account
+
+    if update_username:
+        if update_plan is None and update_quota is None:
+            raise click.UsageError("--update requires --plan and/or --quota-limit")
+        if not update_account(update_username, plan=update_plan, quota_limit=update_quota):
+            raise click.ClickException(f"Account '{update_username}' not found in cache")
+        print(f"Updated {update_username}:")
+        if update_plan is not None:
+            print(f"  plan: {update_plan}")
+        if update_quota is not None:
+            print(f"  quota: {update_quota}")
+        return
+
     accts = list_accounts()
     if not accts:
         print("No cached accounts.")
@@ -85,7 +106,10 @@ def accounts():
     print(f"Cached accounts ({len(accts)}):")
     for acct in accts:
         status = "valid" if acct["valid"] else "expired/invalid"
-        print(f"  - {acct['username']} ({status})")
+        plan = acct.get("plan") or "unset"
+        quota = acct.get("quota_limit")
+        quota_str = str(quota) if quota is not None else "unset"
+        print(f"  - {acct['username']} ({status}, plan: {plan}, quota: {quota_str})")
 
 
 @main.command()

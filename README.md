@@ -93,6 +93,9 @@ python copilot_adapter.py serve
 # List cached accounts
 python copilot_adapter.py accounts
 
+# Update plan/quota for a cached account
+python copilot_adapter.py accounts --update octocat --plan pro+ --quota-limit 1500
+
 # Remove a specific account
 python copilot_adapter.py logout --username octocat
 
