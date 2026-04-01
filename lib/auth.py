@@ -61,7 +61,7 @@ def _load_github_tokens() -> list[dict]:
 
 
 def get_cached_account_meta() -> dict[str, dict]:
-    """Return a mapping of token → {plan, quota_limit} from the token cache."""
+    """Return a mapping of token → {plan, quota_limit, premium_used} from the token cache."""
     meta: dict[str, dict] = {}
     for acct in _load_github_tokens():
         token = acct.get("github_token", "")
@@ -70,6 +70,8 @@ def get_cached_account_meta() -> dict[str, dict]:
             entry["plan"] = acct["plan"]
         if "quota_limit" in acct:
             entry["quota_limit"] = acct["quota_limit"]
+        if "premium_used" in acct:
+            entry["premium_used"] = acct["premium_used"]
         if entry:
             meta[token] = entry
     return meta
@@ -197,18 +199,21 @@ def device_flow_login() -> str:
         if username:
             print(f"Logged in as {username}")
 
-            # Prompt for plan and quota
+            # Prompt for plan, quota, and current usage
             plan = input("Copilot plan [free/pro/pro+/business/enterprise] (pro): ").strip() or "pro"
             default_quota = {"free": "50", "pro": "300", "pro+": "1500",
                              "business": "300", "enterprise": "1000"}.get(plan, "300")
             quota_str = input(f"Monthly premium request quota ({default_quota}): ").strip()
             quota_limit = int(quota_str) if quota_str else int(default_quota)
+            usage_str = input("Current premium request usage (0): ").strip()
+            premium_used = float(usage_str) if usage_str else 0
 
             accounts = _load_github_tokens()
             accounts = [a for a in accounts if a["github_token"] != token]
             accounts.append({
                 "github_token": token, "username": username,
                 "plan": plan, "quota_limit": quota_limit,
+                "premium_used": premium_used,
             })
             _save_github_tokens(accounts)
             _print_cached_accounts(accounts)
@@ -251,48 +256,23 @@ def list_accounts() -> list[dict]:
     for acct in accounts:
         token = acct["github_token"]
         username = _validate_github_token(token)
-        entry = {
+        result.append({
             "username": acct["username"],
             "valid": username is not None,
             "plan": acct.get("plan"),
             "quota_limit": acct.get("quota_limit"),
-            "token": token,
-        }
-        result.append(entry)
+            "premium_used": acct.get("premium_used", 0),
+        })
     return result
 
 
-def fetch_usage(token: str, username: str) -> float | None:
-    """Fetch premium request usage from the GitHub billing API.
-
-    Returns the total premium requests used this month, or None on failure.
-    """
-    try:
-        r = httpx.get(
-            f"https://api.github.com/users/{username}/settings/billing/premium_request/usage",
-            headers={
-                "authorization": f"token {token}",
-                "accept": "application/vnd.github+json",
-                "x-github-api-version": "2026-03-10",
-            },
-            timeout=30,
-        )
-        if r.status_code == 200:
-            data = r.json()
-            return sum(
-                item.get("netQuantity", 0)
-                for item in data.get("usageItems", [])
-            )
-    except Exception:
-        pass
-    return None
-
 
 def add_account(token: str, *, plan: str | None = None,
-                quota_limit: int | None = None) -> dict | None:
+                quota_limit: int | None = None,
+                premium_used: float | None = None) -> dict | None:
     """Validate a PAT and add it to the cached accounts.
 
-    Returns a dict with username/plan/quota_limit on success, None if invalid.
+    Returns a dict with username/plan/quota_limit/premium_used on success, None if invalid.
     """
     from .account_manager import PLAN_QUOTAS
 
@@ -303,15 +283,19 @@ def add_account(token: str, *, plan: str | None = None,
     plan = plan or "pro"
     if quota_limit is None:
         quota_limit = PLAN_QUOTAS.get(plan, 300)
+    if premium_used is None:
+        premium_used = 0
 
     accounts = _load_github_tokens()
     accounts = [a for a in accounts if a["github_token"] != token]
     accounts.append({
         "github_token": token, "username": username,
         "plan": plan, "quota_limit": quota_limit,
+        "premium_used": premium_used,
     })
     _save_github_tokens(accounts)
-    return {"username": username, "plan": plan, "quota_limit": quota_limit}
+    return {"username": username, "plan": plan, "quota_limit": quota_limit,
+            "premium_used": premium_used}
 
 
 def remove_account(username: str) -> bool:
@@ -328,8 +312,9 @@ def remove_account(username: str) -> bool:
 
 
 def update_account(username: str, *, plan: str | None = None,
-                   quota_limit: int | None = None) -> bool:
-    """Update plan and/or quota_limit for a cached account by username.
+                   quota_limit: int | None = None,
+                   premium_used: float | None = None) -> bool:
+    """Update plan, quota_limit, and/or premium_used for a cached account.
 
     Returns True if the account was found and updated, False otherwise.
     """
@@ -341,6 +326,8 @@ def update_account(username: str, *, plan: str | None = None,
                 acct["plan"] = plan
             if quota_limit is not None:
                 acct["quota_limit"] = quota_limit
+            if premium_used is not None:
+                acct["premium_used"] = premium_used
             found = True
             break
     if found:

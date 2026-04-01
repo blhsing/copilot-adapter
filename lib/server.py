@@ -56,11 +56,10 @@ async def _lifespan(application: FastAPI):
     global account_mgr
     tokens_raw = os.environ.get("_COPILOT_ADAPTER_GITHUB_TOKENS", "")
     if tokens_raw and account_mgr is None:
-        # Format: "token1:username1:plan1:quota1,token2:username2:plan2:quota2"
+        # Format: "token1:username1:plan1:quota1:usage1,..."
         strategy = os.environ.get("_COPILOT_ADAPTER_STRATEGY", "max-usage")
         quota_limit_raw = os.environ.get("_COPILOT_ADAPTER_QUOTA_LIMIT", "")
         quota_limit = int(quota_limit_raw) if quota_limit_raw else None
-        local_tracking = os.environ.get("_COPILOT_ADAPTER_LOCAL_TRACKING", "") == "1"
         plan = os.environ.get("_COPILOT_ADAPTER_PLAN", "pro")
         accounts: list[dict] = []
         for entry in tokens_raw.split(","):
@@ -71,10 +70,11 @@ async def _lifespan(application: FastAPI):
                     acct["plan"] = parts[2]
                 if len(parts) >= 4 and parts[3]:
                     acct["quota_limit"] = int(parts[3])
+                if len(parts) >= 5 and parts[4]:
+                    acct["premium_used"] = float(parts[4])
                 accounts.append(acct)
         account_mgr = AccountManager(
-            accounts, strategy=strategy, quota_limit=quota_limit,
-            local_tracking=local_tracking, plan=plan,
+            accounts, strategy=strategy, quota_limit=quota_limit, plan=plan,
         )
 
         cors_raw = os.environ.get("_COPILOT_ADAPTER_CORS_ORIGINS", "")

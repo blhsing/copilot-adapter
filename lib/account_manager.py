@@ -1,18 +1,13 @@
 """Multi-account management with rotation strategies."""
 
-import logging
 import asyncio
-import time
+import logging
 from dataclasses import dataclass, field
-
-import httpx
 
 from lib.auth import CopilotTokenManager
 from lib.client import CopilotClient
 
 logger = logging.getLogger(__name__)
-
-QUOTA_REFRESH_INTERVAL = 300  # seconds between usage API checks
 
 # Premium request multipliers per plan type.
 # Source: https://docs.github.com/en/copilot/concepts/billing/copilot-requests
@@ -91,11 +86,10 @@ class AccountInfo:
     username: str
     token_manager: CopilotTokenManager
     client: CopilotClient
-    plan: str = "paid"
+    plan: str = "pro"
     premium_used: float = 0
-    premium_limit: int | None = None  # None = unknown (no --quota-limit)
+    premium_limit: int | None = None  # None = unknown
     exhausted: bool = False
-    last_quota_check: float = 0
 
 
 class AccountManager:
@@ -112,7 +106,6 @@ class AccountManager:
         accounts: list[tuple[str, str]] | list[dict],
         strategy: str = "max-usage",
         quota_limit: int | None = None,
-        local_tracking: bool = False,
         plan: str = "pro",
     ):
         if strategy not in self.STRATEGIES:
@@ -121,7 +114,6 @@ class AccountManager:
             raise ValueError("At least one account is required")
 
         self._strategy = strategy
-        self._local_tracking = local_tracking
         self._plan = plan
         self._lock = asyncio.Lock()
         self._rr_index = -1
@@ -134,10 +126,12 @@ class AccountManager:
                 username = acct["username"]
                 acct_plan = acct.get("plan", plan)
                 acct_limit = acct.get("quota_limit", quota_limit)
+                acct_used = acct.get("premium_used", 0)
             else:
                 token, username = acct
                 acct_plan = plan
                 acct_limit = quota_limit
+                acct_used = 0
             # Default quota limit from plan if not explicitly set
             if acct_limit is None:
                 acct_limit = PLAN_QUOTAS.get(acct_plan)
@@ -149,6 +143,7 @@ class AccountManager:
                 token_manager=tm,
                 client=client,
                 plan=acct_plan,
+                premium_used=acct_used,
                 premium_limit=acct_limit,
             ))
 
@@ -170,9 +165,6 @@ class AccountManager:
 
         For ``"agent"`` initiator, returns the same client as the most recent
         ``"user"`` request. For ``"user"`` initiator, selects based on strategy.
-
-        When local tracking is enabled, call :meth:`record_usage` after the
-        request to account for the model's premium request multiplier.
         """
         async with self._lock:
             if initiator == "agent" and self._last_user_account is not None:
@@ -185,12 +177,9 @@ class AccountManager:
     async def record_usage(self, client: CopilotClient, model: str) -> None:
         """Record a premium request for the account owning *client*.
 
-        Only has an effect when local tracking is enabled. Uses the model's
-        multiplier (based on the configured plan) to accurately track
-        premium request consumption.
+        Uses the model's multiplier (based on the configured plan) to
+        accurately track premium request consumption.
         """
-        if not self._local_tracking:
-            return
         async with self._lock:
             for acct in self._accounts:
                 if acct.client is client:
@@ -201,7 +190,7 @@ class AccountManager:
                     if acct.premium_limit is not None and acct.premium_used >= acct.premium_limit:
                         acct.exhausted = True
                         logger.info(
-                            "Account %s reached quota limit (%.1f/%d) via local tracking",
+                            "Account %s reached quota limit (%.1f/%d)",
                             acct.username, acct.premium_used, acct.premium_limit,
                         )
                     break
@@ -234,54 +223,6 @@ class AccountManager:
                     break
             return available[0].client
 
-    async def refresh_quota(self, acct: AccountInfo) -> None:
-        """Fetch premium request usage from the GitHub billing API."""
-        if time.time() - acct.last_quota_check < QUOTA_REFRESH_INTERVAL:
-            return
-        try:
-            async with httpx.AsyncClient(timeout=30) as client:
-                r = await client.get(
-                    f"https://api.github.com/users/{acct.username}/settings/billing/premium_request/usage",
-                    headers={
-                        "authorization": f"token {acct.token}",
-                        "accept": "application/vnd.github+json",
-                        "x-github-api-version": "2026-03-10",
-                    },
-                )
-            if r.status_code == 200:
-                data = r.json()
-                total = sum(
-                    item.get("netQuantity", 0)
-                    for item in data.get("usageItems", [])
-                )
-                acct.premium_used = total
-                acct.last_quota_check = time.time()
-                if acct.premium_limit is not None and acct.premium_used >= acct.premium_limit:
-                    acct.exhausted = True
-                    logger.info(
-                        "Account %s reached quota limit (%.1f/%d)",
-                        acct.username, acct.premium_used, acct.premium_limit,
-                    )
-            else:
-                logger.debug(
-                    "Quota API returned %d for %s, skipping", r.status_code, acct.username
-                )
-        except Exception:
-            logger.debug("Failed to fetch quota for %s", acct.username, exc_info=True)
-        acct.last_quota_check = time.time()
-
-    async def refresh_all_quotas(self) -> None:
-        """Refresh quota data for all accounts."""
-        for acct in self._accounts:
-            await self.refresh_quota(acct)
-
-    async def _sync_usage_if_needed(self, available: list[AccountInfo]) -> None:
-        """Sync usage data from billing API unless local tracking is active."""
-        if self._local_tracking:
-            return
-        for acct in available:
-            await self.refresh_quota(acct)
-
     async def _select_by_strategy(self) -> AccountInfo:
         """Apply the configured rotation strategy. Must be called with lock held."""
         available = [a for a in self._accounts if not a.exhausted]
@@ -289,16 +230,6 @@ class AccountManager:
             raise RuntimeError(
                 "All accounts have exhausted their premium request quota."
             )
-
-        # Sync usage for usage-based strategies (no-op if local tracking)
-        if self._strategy in ("max-usage", "min-usage"):
-            await self._sync_usage_if_needed(available)
-            # Re-filter after refresh (some may have become exhausted)
-            available = [a for a in self._accounts if not a.exhausted]
-            if not available:
-                raise RuntimeError(
-                    "All accounts have exhausted their premium request quota."
-                )
 
         if self._strategy == "round-robin":
             self._rr_index = (self._rr_index + 1) % len(self._accounts)

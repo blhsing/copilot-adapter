@@ -12,7 +12,7 @@ from lib.account_manager import AccountInfo, AccountManager
 
 
 def _make_manager(n: int = 3, strategy: str = "round-robin", quota_limit=None,
-                   local_tracking=False, plan="pro"):
+                   plan="pro"):
     """Create an AccountManager with *n* mock accounts."""
     accounts = [(f"token_{i}", f"user_{i}") for i in range(n)]
     with patch("lib.account_manager.CopilotTokenManager") as MockTM, \
@@ -20,7 +20,7 @@ def _make_manager(n: int = 3, strategy: str = "round-robin", quota_limit=None,
         MockTM.side_effect = lambda t: MagicMock(github_token=t)
         MockClient.side_effect = lambda tm: MagicMock(name=f"client_{tm.github_token}")
         mgr = AccountManager(accounts, strategy=strategy, quota_limit=quota_limit,
-                             local_tracking=local_tracking, plan=plan)
+                             plan=plan)
     return mgr
 
 
@@ -159,45 +159,39 @@ class TestQuotaLimit:
             assert a.premium_limit == 300  # pro plan default
 
 
-class TestLocalTracking:
+class TestUsageTracking:
     async def test_record_usage_increments_with_multiplier(self):
-        mgr = _make_manager(2, "max-usage", local_tracking=True)
+        mgr = _make_manager(2, "max-usage")
         client = await mgr.get_client("user")
         await mgr.record_usage(client, "claude-opus-4.6")  # 3x
         assert mgr._accounts[0].premium_used == 3.0
 
     async def test_record_usage_zero_multiplier_model(self):
-        mgr = _make_manager(2, "max-usage", local_tracking=True)
+        mgr = _make_manager(2, "max-usage")
         client = await mgr.get_client("user")
         await mgr.record_usage(client, "gpt-4o")  # 0x
         assert mgr._accounts[0].premium_used == 0
 
     async def test_record_usage_fractional_multiplier(self):
-        mgr = _make_manager(2, "max-usage", local_tracking=True)
+        mgr = _make_manager(2, "max-usage")
         client = await mgr.get_client("user")
         await mgr.record_usage(client, "claude-haiku-4.5")  # 0.33x
         assert mgr._accounts[0].premium_used == pytest.approx(0.33)
 
     async def test_record_usage_unknown_model_defaults_to_1(self):
-        mgr = _make_manager(2, "max-usage", local_tracking=True)
+        mgr = _make_manager(2, "max-usage")
         client = await mgr.get_client("user")
         await mgr.record_usage(client, "some-future-model")
         assert mgr._accounts[0].premium_used == 1.0
 
     async def test_record_usage_prefix_match(self):
-        mgr = _make_manager(2, "max-usage", local_tracking=True)
+        mgr = _make_manager(2, "max-usage")
         client = await mgr.get_client("user")
         await mgr.record_usage(client, "gpt-4o-2024-07-18")  # matches gpt-4o → 0x
         assert mgr._accounts[0].premium_used == 0
 
-    async def test_does_not_record_without_local_tracking(self):
-        mgr = _make_manager(2, "round-robin", local_tracking=False)
-        client = await mgr.get_client("user")
-        await mgr.record_usage(client, "claude-sonnet-4.6")
-        assert mgr._accounts[0].premium_used == 0
-
     async def test_exhausts_at_quota_limit(self):
-        mgr = _make_manager(2, "max-usage", quota_limit=5, local_tracking=True)
+        mgr = _make_manager(2, "max-usage", quota_limit=5)
         client = await mgr.get_client("user")
         await mgr.record_usage(client, "claude-opus-4.6")  # 3x → 3
         client = await mgr.get_client("user")  # still account 0 (3 < 5)
@@ -207,15 +201,14 @@ class TestLocalTracking:
         client = await mgr.get_client("user")
         assert client is mgr._accounts[1].client
 
-
     async def test_free_plan_all_models_cost_1(self):
-        mgr = _make_manager(2, "max-usage", local_tracking=True, plan="free")
+        mgr = _make_manager(2, "max-usage", plan="free")
         client = await mgr.get_client("user")
         await mgr.record_usage(client, "gpt-4o")  # 0x on paid, 1x on free
         assert mgr._accounts[0].premium_used == 1.0
 
     async def test_paid_plan_included_models_cost_0(self):
-        mgr = _make_manager(2, "max-usage", local_tracking=True, plan="pro")
+        mgr = _make_manager(2, "max-usage", plan="pro")
         client = await mgr.get_client("user")
         await mgr.record_usage(client, "gpt-4o")  # 0x on paid
         assert mgr._accounts[0].premium_used == 0
