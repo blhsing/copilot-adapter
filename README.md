@@ -316,3 +316,29 @@ Tests use the cheapest available models (`gpt-4o-mini` for chat, `gpt-5-mini` fo
 2. GitHub tokens are exchanged for short-lived Copilot API tokens via `api.github.com/copilot_internal/v2/token`, automatically refreshed every ~25 minutes with concurrent-access protection (double-checked locking ensures only one refresh happens at a time)
 3. For multi-account setups, the `AccountManager` selects which account to use based on the configured rotation strategy, sticking to the same account for agent-initiated follow-ups
 4. Incoming requests are translated (if needed) to the format Copilot expects, proxied to `api.githubcopilot.com`, and responses are translated back to the client's expected format
+
+## Known issues
+
+### PowerShell enters debug mode after Ctrl+C (Windows 10)
+
+On Windows 10, pressing Ctrl+C to stop the server may cause PowerShell to enter debug mode with a message like:
+
+```
+Entering debug mode. Type 'h' or '?' for help.
+```
+
+This is a [known bug in PSReadLine 2.0.0](https://github.com/PowerShell/PSReadLine/issues/1193) bundled with Windows 10. To fix it, upgrade PSReadLine in an elevated PowerShell:
+
+```powershell
+Install-Module PSReadLine -Force -SkipPublisherCheck
+```
+
+If you're behind an HTTP proxy:
+
+```powershell
+[System.Net.WebRequest]::DefaultWebProxy = New-Object System.Net.WebProxy("http://proxy-host:port")
+[System.Net.WebRequest]::DefaultWebProxy.Credentials = [System.Net.CredentialCache]::DefaultCredentials
+Install-Module PSReadLine -Force -SkipPublisherCheck
+```
+
+Restart PowerShell after upgrading. This issue does not affect Windows 11, Windows Terminal, or cmd.exe.
