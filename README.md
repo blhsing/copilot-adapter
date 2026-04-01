@@ -115,8 +115,8 @@ python copilot_adapter.py logout --all
 | Strategy | Behavior | Pros | Cons |
 |----------|----------|------|------|
 | `max-usage` (default) | Concentrate all usage on one account until its quota is exhausted, then move to the next | Maximizes the number of accounts kept at zero usage as reserves; best server-side cache efficiency since all requests hit the same account's session; simple and predictable | One account bears all the load; if the month resets mid-use, the reserve accounts were never needed |
-| `min-usage` | Always pick the account with the lowest usage | Spreads consumption evenly across all accounts; maximizes headroom on every account | All accounts accumulate usage simultaneously, so none are kept clean as a reserve |
-| `round-robin` | Rotate blindly on each user-initiated request | No API calls needed to check usage; lowest overhead | No awareness of quota — won't avoid accounts nearing their limit |
+| `min-usage` | Always pick the account with the lowest usage | Spreads consumption evenly across all accounts; maximizes headroom on every account; reduces risk of hitting per-account rate limits | All accounts accumulate usage simultaneously, so none are kept clean as a reserve |
+| `round-robin` | Rotate blindly on each user-initiated request | Simple and predictable; spreads load without needing usage data | No awareness of quota — won't avoid accounts nearing their limit |
 
 Agent-initiated requests (tool-use follow-ups) always stay on the same account as the preceding user request to avoid unnecessary premium request charges.
 
