@@ -119,7 +119,7 @@ Agent-initiated requests (tool-use follow-ups) always stay on the same account a
 
 For proactive switching *before* hitting the limit, set `--quota-limit N` or let it default from the plan. By default the server periodically checks each account's usage via the GitHub billing API. If this server is the only consumer of the quota, add `--local-tracking` to count requests in-memory instead — this eliminates all billing API calls and gives instant, accurate tracking without network overhead. Local tracking applies each model's premium request multiplier (e.g. Claude Opus 4.6 costs 3x, GPT-4o costs 0x on paid plans). These defaults can be overridden per account — see [Per-account plan and quota](#per-account-plan-and-quota).
 
-> **Note:** The GitHub billing API requires a PAT with the `copilot` scope. Device-flow tokens (from `copilot_adapter.py login`) cannot access billing data. If you use `min-usage` with device-flow accounts, add `--local-tracking` — otherwise the server cannot determine actual usage and all accounts will appear to have zero usage. The `max-usage` and `round-robin` strategies are unaffected since they don't rely on billing data to select accounts.
+> **Note:** The GitHub billing API requires a PAT with the `user` scope. Device-flow tokens (from `copilot_adapter.py login`) cannot access billing data. If you use `min-usage` with device-flow accounts, add `--local-tracking` — otherwise the server cannot determine actual usage and all accounts will appear to have zero usage. The `max-usage` and `round-robin` strategies are unaffected since they don't rely on billing data to select accounts.
 
 **Supported plans** (`--plan`):
 
