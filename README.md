@@ -1,6 +1,6 @@
 # copilot-adapter
 
-An OpenAI / Anthropic / Gemini-compatible LLM API server backed by GitHub Copilot.
+An OpenAI / Anthropic / Gemini-compatible LLM API proxy server backed by GitHub Copilot.
 
 Authenticates via a GitHub Personal Access Token (PAT) or GitHub's device flow, then proxies requests to GitHub Copilot's backend through a local server that speaks all three major LLM API formats.
 
@@ -9,14 +9,13 @@ Authenticates via a GitHub Personal Access Token (PAT) or GitHub's device flow, 
 - **Multi-account pooling** — Configure multiple GitHub Copilot accounts and rotate between them to pool premium request quotas, with three rotation strategies and automatic exhaustion detection via response model mismatch
 - **Per-account plan and quota** — Mix accounts on different Copilot tiers (free, pro, pro+, business, enterprise) with per-account quota limits that auto-derive from the plan
 - **Smart premium request billing** — Automatically infers `X-Initiator: agent` for agentic follow-ups (tool results) to avoid extra premium request charges, with no client-side changes needed; also supports explicit `X-Initiator` header passthrough
+- **Rate limit handling** — Automatically retries on 429 errors by rotating to the next available account
 - **Three API formats** — Serves OpenAI, Anthropic, and Gemini endpoints simultaneously, so any SDK or tool that speaks one of these formats works out of the box
 - **Streaming support** — Full SSE streaming across all three formats, including real-time format translation for Anthropic and Gemini streams
-- **JSON config file** — Configure all settings including per-account overrides via `~/.copilot-adapter.json`, with CLI > env var > config file precedence
 - **Flexible authentication** — Supports multiple GitHub PATs, `COPILOT_ADAPTER_GITHUB_TOKEN` / `GITHUB_TOKEN` env vars, cached tokens, and interactive device-flow OAuth, with automatic fallback
 - **Multi-worker support** — `--workers N` spawns multiple uvicorn worker processes for higher throughput (defaults to number of CPUs)
 - **Concurrent-safe token management** — Double-checked locking ensures only one token refresh happens at a time under concurrent load
 - **Docker ready** — Pre-built image on [GHCR](https://github.com/blhsing/copilot-adapter/pkgs/container/copilot-adapter), or build locally
-- **Environment variable configuration** — All CLI options can be configured via environment variables for container and CI-friendly deployments
 - **CORS support** — Optional `--cors-origin` flag for browser-based applications
 
 ## Prerequisites
