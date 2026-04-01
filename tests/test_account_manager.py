@@ -12,7 +12,7 @@ from lib.account_manager import AccountInfo, AccountManager
 
 
 def _make_manager(n: int = 3, strategy: str = "round-robin", quota_limit=None,
-                   local_tracking=False, plan="paid"):
+                   local_tracking=False, plan="pro"):
     """Create an AccountManager with *n* mock accounts."""
     accounts = [(f"token_{i}", f"user_{i}") for i in range(n)]
     with patch("lib.account_manager.CopilotTokenManager") as MockTM, \
@@ -153,10 +153,10 @@ class TestQuotaLimit:
         for a in mgr._accounts:
             assert a.premium_limit == 100
 
-    async def test_no_quota_limit_by_default(self):
-        mgr = _make_manager(3, "round-robin")
+    async def test_quota_limit_defaults_from_plan(self):
+        mgr = _make_manager(3, "round-robin")  # default plan is "pro"
         for a in mgr._accounts:
-            assert a.premium_limit is None
+            assert a.premium_limit == 300  # pro plan default
 
 
 class TestLocalTracking:
@@ -215,7 +215,7 @@ class TestLocalTracking:
         assert mgr._accounts[0].premium_used == 1.0
 
     async def test_paid_plan_included_models_cost_0(self):
-        mgr = _make_manager(2, "max-usage", local_tracking=True, plan="paid")
+        mgr = _make_manager(2, "max-usage", local_tracking=True, plan="pro")
         client = await mgr.get_client("user")
         await mgr.record_usage(client, "gpt-4o")  # 0x on paid
         assert mgr._accounts[0].premium_used == 0

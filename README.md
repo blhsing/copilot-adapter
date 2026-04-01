@@ -56,6 +56,23 @@ python copilot_adapter.py logout
 
 Token lookup order: `--github-token` flag > `COPILOT_ADAPTER_GITHUB_TOKEN` env var > `GITHUB_TOKEN` env var > cached tokens > interactive device flow.
 
+### Per-account plan and quota
+
+When accounts are on different Copilot tiers, append the plan and quota limit to the token with colons:
+
+```bash
+# TOKEN:PLAN:QUOTA format
+python copilot_adapter.py serve \
+  --github-token ghp_aaa:pro:300 \
+  --github-token ghp_bbb:free:50
+
+# Bare tokens fall back to the global --plan default (pro) and its quota (300)
+python copilot_adapter.py serve \
+  --github-token ghp_aaa:enterprise:1000 \
+  --github-token ghp_bbb:free:50 \
+  --github-token ghp_ccc
+```
+
 ### Multi-account
 
 Pool multiple GitHub Copilot accounts to extend your premium request quota:
@@ -94,7 +111,54 @@ Agent-initiated requests (tool-use follow-ups) always stay on the same account a
 
 **Quota exhaustion detection**: When a Copilot account's premium request quota is exhausted, GitHub silently downgrades the response to a free fallback model (e.g. GPT-4.1) instead of returning an error. The server detects this by comparing the model in the response against the model that was requested — if they don't match, it marks the account as exhausted and automatically retries the request with the next available account. This works for both streaming and non-streaming requests.
 
-For proactive switching *before* hitting the limit, set `--quota-limit N` to the monthly premium request allowance of your plan (Free: 50, Pro: 300, Pro+: 1500). By default the server periodically checks each account's usage via the GitHub billing API. If this server is the only consumer of the quota, add `--local-tracking` to count requests in-memory instead — this eliminates all billing API calls and gives instant, accurate tracking without network overhead. Local tracking applies each model's premium request multiplier (e.g. Claude Opus 4.6 costs 3x, GPT-4o costs 0x on paid plans). Set `--plan free` if your accounts are on the Copilot Free plan, where every model costs 1x.
+For proactive switching *before* hitting the limit, set `--quota-limit N` or let it default from the plan. By default the server periodically checks each account's usage via the GitHub billing API. If this server is the only consumer of the quota, add `--local-tracking` to count requests in-memory instead — this eliminates all billing API calls and gives instant, accurate tracking without network overhead. Local tracking applies each model's premium request multiplier (e.g. Claude Opus 4.6 costs 3x, GPT-4o costs 0x on paid plans). These defaults can be overridden per account — see [Per-account plan and quota](#per-account-plan-and-quota).
+
+**Supported plans** (`--plan`):
+
+| Plan | Monthly premium requests | Model multipliers |
+|------|------------------------:|-------------------|
+| `free` | 50 | All models cost 1x |
+| `pro` (default) | 300 | Differentiated (e.g. GPT-4o: 0x, Claude Opus: 3x) |
+| `pro+` | 1500 | Same as `pro` |
+| `business` | 300 | Same as `pro` |
+| `enterprise` | 1000 | Same as `pro` |
+
+When `--quota-limit` is not specified, it defaults to the plan's monthly allowance.
+
+### Config file
+
+All settings can be placed in a JSON config file instead of (or alongside) CLI flags and environment variables. The server looks for `~/.copilot-adapter.json` by default, or you can specify a path with `--config`:
+
+```bash
+python copilot_adapter.py serve --config /path/to/config.json
+```
+
+Example `~/.copilot-adapter.json`:
+
+```json
+{
+  "host": "0.0.0.0",
+  "port": 18080,
+  "strategy": "max-usage",
+  "plan": "pro",
+  "local_tracking": true,
+  "workers": 4,
+  "cors_origins": ["*"],
+  "accounts": [
+    {"token": "ghp_aaa", "plan": "enterprise", "quota_limit": 1000},
+    {"token": "ghp_bbb", "plan": "free"},
+    "ghp_ccc:pro+:1500",
+    "ghp_ddd"
+  ]
+}
+```
+
+Account entries in the `accounts` array can be:
+- **Objects** with `token` (required), `plan` (optional), and `quota_limit` (optional) fields
+- **Strings** in `TOKEN:PLAN:QUOTA` format (same as the CLI `--github-token` syntax)
+- **Bare token strings** that fall back to the top-level `plan` and `quota_limit` defaults
+
+**Precedence** (highest to lowest): CLI flags > environment variables > config file > built-in defaults.
 
 ### Environment variables
 
@@ -102,15 +166,16 @@ All CLI options can be set via environment variables:
 
 | Flag | Environment variable | Default |
 |------|---------------------|---------|
+| `--config` | `COPILOT_ADAPTER_CONFIG` | `~/.copilot-adapter.json` |
 | `--host` | `COPILOT_ADAPTER_HOST` | `127.0.0.1` |
 | `--port` | `COPILOT_ADAPTER_PORT` | `18080` |
 | `--github-token` | `COPILOT_ADAPTER_GITHUB_TOKEN` | *(none)* |
 | `--cors-origin` | `COPILOT_ADAPTER_CORS_ORIGIN` | *(none)* |
 | `--workers` | `COPILOT_ADAPTER_WORKERS` | number of CPUs |
 | `--strategy` | `COPILOT_ADAPTER_STRATEGY` | `max-usage` |
-| `--quota-limit` | `COPILOT_ADAPTER_QUOTA_LIMIT` | *(none)* |
+| `--quota-limit` | `COPILOT_ADAPTER_QUOTA_LIMIT` | per plan |
 | `--local-tracking` | `COPILOT_ADAPTER_LOCAL_TRACKING` | off |
-| `--plan` | `COPILOT_ADAPTER_PLAN` | `paid` |
+| `--plan` | `COPILOT_ADAPTER_PLAN` | `pro` |
 
 `GITHUB_TOKEN` is also accepted as a fallback for the GitHub token. Multiple tokens can be comma-separated in `COPILOT_ADAPTER_GITHUB_TOKEN` or `GITHUB_TOKEN`.
 
