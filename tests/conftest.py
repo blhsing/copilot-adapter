@@ -20,17 +20,20 @@ from lib.client import CopilotClient
 
 @pytest.fixture(scope="session")
 def github_token() -> str:
-    """Authenticate with GitHub (interactive on first run)."""
-    return device_flow_login()
+    from lib.auth import _load_github_tokens
 
+    # use cache since stdin is generally disabled during pytest run
+    cached = _load_github_tokens()
+    if cached:
+        return cached[0]["github_token"]
+    pytest.skip("No cached GitHub token found, skipping live API tests.")
 
-@pytest.fixture(scope="session")
-def token_manager(github_token: str) -> CopilotTokenManager:
+@pytest_asyncio.fixture(scope="session")
+async def token_manager(github_token: str) -> CopilotTokenManager:
     tm = CopilotTokenManager(github_token)
     # Eagerly verify the token works
-    tm.get_token()
+    await tm.get_token()
     return tm
-
 
 @pytest.fixture(scope="session")
 def client(token_manager: CopilotTokenManager) -> CopilotClient:
