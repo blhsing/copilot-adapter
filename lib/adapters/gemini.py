@@ -71,6 +71,11 @@ def _convert_parts_to_openai(parts: list, role: str) -> list[dict]:
 
 
 def _gemini_to_openai(body: dict, model: str) -> dict:
+    if "gemini-3.1-pro" in model and "preview" not in model:
+        model = "gemini-3.1-pro-preview"
+    elif "gemini-3-flash" in model and "preview" not in model:
+        model = "gemini-3-flash-preview"
+
     messages = []
 
     sys_inst = body.get("systemInstruction")
