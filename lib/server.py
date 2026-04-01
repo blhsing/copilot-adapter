@@ -392,6 +392,22 @@ async def embeddings(request: Request):
 # Anthropic endpoint
 # ---------------------------------------------------------------------------
 
+@app.post("/v1/messages/count_tokens")
+@app.post("/messages/count_tokens")
+async def count_tokens(request: Request):
+    """Stub for the Anthropic token counting API."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    # Simple heuristic: ~4 chars per token for text content
+    text_content = json.dumps(body)
+    token_count = max(1, len(text_content) // 4)
+
+    return JSONResponse(content={"input_tokens": token_count})
+
+
 @app.post("/v1/messages")
 @app.post("/messages")
 async def messages(request: Request):
