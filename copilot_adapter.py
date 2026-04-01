@@ -52,10 +52,10 @@ def _load_config(path: str | None) -> dict:
 
 
 def _parse_token_spec(raw: str) -> dict:
-    """Parse a token spec like ``ghp_xxx`` or ``ghp_xxx:free:50``.
+    """Parse a token spec like ``ghp_xxx`` or ``ghp_xxx:free:50:10.5``.
 
-    Returns a dict with keys ``token`` and optionally ``plan`` and
-    ``quota_limit``.
+    Returns a dict with keys ``token`` and optionally ``plan``,
+    ``quota_limit``, and ``premium_used``.
     """
     parts = raw.split(":")
     result: dict = {"token": parts[0]}
@@ -63,6 +63,8 @@ def _parse_token_spec(raw: str) -> dict:
         result["plan"] = parts[1]
     if len(parts) >= 3 and parts[2]:
         result["quota_limit"] = int(parts[2])
+    if len(parts) >= 4 and parts[3]:
+        result["premium_used"] = float(parts[3])
     return result
 
 
@@ -102,24 +104,28 @@ def logout(username: str | None, remove_all: bool):
 @click.option("--remove", "remove_username", default=None,
               help="Remove a cached account by username.")
 @click.option("--update", "update_username", default=None,
-              help="Update plan/quota for a cached account by username.")
+              help="Update settings for a cached account by username.")
 @click.option("--plan", "update_plan", default=None,
               type=click.Choice(list(_VALID_PLANS)),
               help="Set the Copilot plan for the account.")
 @click.option("--quota-limit", "update_quota", default=None, type=int,
               help="Set the monthly premium request quota for the account.")
+@click.option("--usage", "update_usage", default=None, type=float,
+              help="Set the current premium request usage for the account.")
 def accounts(add_token: str | None, remove_username: str | None,
              update_username: str | None, update_plan: str | None,
-             update_quota: int | None):
+             update_quota: int | None, update_usage: float | None):
     """Manage cached accounts: list, add, remove, or update."""
-    from lib.auth import (add_account, fetch_usage, list_accounts,
+    from lib.auth import (add_account, list_accounts,
                           remove_account, update_account)
 
     if add_token:
-        result = add_account(add_token, plan=update_plan, quota_limit=update_quota)
+        result = add_account(add_token, plan=update_plan, quota_limit=update_quota,
+                             premium_used=update_usage)
         if result is None:
             raise click.ClickException("Invalid token — could not authenticate with GitHub")
-        print(f"Added {result['username']} (plan: {result['plan']}, quota: {result['quota_limit']})")
+        print(f"Added {result['username']} (plan: {result['plan']}, "
+              f"quota: {result['quota_limit']}, usage: {result['premium_used']})")
         return
 
     if remove_username:
@@ -129,15 +135,18 @@ def accounts(add_token: str | None, remove_username: str | None,
         return
 
     if update_username:
-        if update_plan is None and update_quota is None:
-            raise click.UsageError("--update requires --plan and/or --quota-limit")
-        if not update_account(update_username, plan=update_plan, quota_limit=update_quota):
+        if update_plan is None and update_quota is None and update_usage is None:
+            raise click.UsageError("--update requires --plan, --quota-limit, and/or --usage")
+        if not update_account(update_username, plan=update_plan, quota_limit=update_quota,
+                              premium_used=update_usage):
             raise click.ClickException(f"Account '{update_username}' not found in cache")
         print(f"Updated {update_username}:")
         if update_plan is not None:
             print(f"  plan: {update_plan}")
         if update_quota is not None:
             print(f"  quota: {update_quota}")
+        if update_usage is not None:
+            print(f"  usage: {update_usage}")
         return
 
     accts = list_accounts()
@@ -150,11 +159,8 @@ def accounts(add_token: str | None, remove_username: str | None,
         plan = acct.get("plan") or "unset"
         quota = acct.get("quota_limit")
         quota_str = str(quota) if quota is not None else "unset"
-        usage = fetch_usage(acct["token"], acct["username"]) if acct["valid"] else None
-        usage_str = f"{usage:.0f}" if usage is not None else "?"
-        print(f"  - {acct['username']} ({status}, plan: {plan}, usage: {usage_str}/{quota_str})")
-    print("\nNote: Usage requires a PAT with the 'user' scope. "
-          "Device-flow tokens show '?'.")
+        usage = acct.get("premium_used", 0)
+        print(f"  - {acct['username']} ({status}, plan: {plan}, usage: {usage}/{quota_str})")
 
 
 @main.command()
@@ -166,7 +172,7 @@ def accounts(add_token: str | None, remove_username: str | None,
 @click.option("--port", default=None, type=int, envvar="COPILOT_ADAPTER_PORT",
               help="Port to bind to.")
 @click.option("--github-token", multiple=True, envvar="COPILOT_ADAPTER_GITHUB_TOKEN",
-              help="GitHub PAT (repeatable, supports TOKEN:PLAN:QUOTA format). "
+              help="GitHub PAT (repeatable, supports TOKEN:PLAN:QUOTA:USAGE format). "
                    "Env var supports comma-separated values.")
 @click.option("--cors-origin", multiple=True, envvar="COPILOT_ADAPTER_CORS_ORIGIN",
               help="Allowed CORS origin (repeatable). Use '*' to allow all origins.")
@@ -179,10 +185,6 @@ def accounts(add_token: str | None, remove_username: str | None,
 @click.option("--quota-limit", default=None, type=int,
               envvar="COPILOT_ADAPTER_QUOTA_LIMIT",
               help="Default monthly premium request limit per account (default: 300).")
-@click.option("--local-tracking", is_flag=True, default=False,
-              envvar="COPILOT_ADAPTER_LOCAL_TRACKING",
-              help="Track usage locally instead of polling the GitHub billing API. "
-                   "Assumes this server is the only consumer of the quota.")
 @click.option("--plan", default=None,
               type=click.Choice(list(_VALID_PLANS)),
               envvar="COPILOT_ADAPTER_PLAN",
@@ -190,11 +192,11 @@ def accounts(add_token: str | None, remove_username: str | None,
 @click.option("--log-level", default=None,
               type=click.Choice(["debug", "info", "warning", "error"], case_sensitive=False),
               envvar="COPILOT_ADAPTER_LOG_LEVEL",
-              help="Logging level (default: warning). Use 'debug' or 'info' for verbose output.")
+              help="Logging level (default: info). Use 'debug' for verbose output.")
 def serve(config_path: str | None, host: str | None, port: int | None,
           github_token: tuple[str, ...], cors_origin: tuple[str, ...],
           workers: int | None, strategy: str | None,
-          quota_limit: int | None, local_tracking: bool, plan: str | None,
+          quota_limit: int | None, plan: str | None,
           log_level: str | None):
     """Start the OpenAI-compatible API server."""
     import uvicorn
@@ -214,13 +216,11 @@ def serve(config_path: str | None, host: str | None, port: int | None,
     quota_limit = quota_limit if quota_limit is not None else cfg.get("quota_limit")
     plan = plan or cfg.get("plan", "pro")
     log_level = log_level or cfg.get("log_level", "info")
-    if not local_tracking:
-        local_tracking = cfg.get("local_tracking", False)
     if not cors_origin:
         cors_origin = tuple(cfg.get("cors_origins", []))
 
     # --- Resolve accounts ---
-    # CLI/env tokens (may include :plan:quota annotations)
+    # CLI/env tokens (may include :plan:quota:usage annotations)
     cli_token_specs = []
     for raw in github_token:
         for part in raw.split(","):
@@ -270,7 +270,7 @@ def serve(config_path: str | None, host: str | None, port: int | None,
     print("Resolving accounts...")
     resolved = resolve_github_tokens(explicit_tokens)
 
-    # Build rich account dicts with per-account plan/quota
+    # Build rich account dicts with per-account plan/quota/usage
     accounts: list[dict] = []
     for token, username in resolved:
         overrides = account_overrides.get(token, {})
@@ -279,11 +279,11 @@ def serve(config_path: str | None, host: str | None, port: int | None,
             "username": username,
             "plan": overrides.get("plan", plan),
             "quota_limit": overrides.get("quota_limit", quota_limit),
+            "premium_used": overrides.get("premium_used", 0),
         })
 
     acct_mgr = AccountManager(
-        accounts, strategy=strategy, quota_limit=quota_limit,
-        local_tracking=local_tracking, plan=plan,
+        accounts, strategy=strategy, quota_limit=quota_limit, plan=plan,
     )
 
     # Verify all accounts can get a Copilot token
@@ -293,20 +293,11 @@ def serve(config_path: str | None, host: str | None, port: int | None,
     except Exception as e:
         raise click.ClickException(f"Failed to get Copilot token: {e}")
 
-    if strategy == "min-usage" and not local_tracking:
-        click.echo(click.style(
-            "Warning: min-usage strategy without --local-tracking requires the "
-            "GitHub billing API, which needs a PAT with the 'user' scope. "
-            "Device-flow tokens cannot access billing data. "
-            "Add --local-tracking for accurate usage-based rotation.",
-            fg="yellow",
-        ), err=True)
-
     n = len(accounts)
     print(f"\nConfigured {n} account(s), strategy: {strategy}")
     for acct in acct_mgr.accounts:
         limit_str = str(acct.premium_limit) if acct.premium_limit is not None else "unset"
-        print(f"  - {acct.username} (plan: {acct.plan}, quota: {limit_str})")
+        print(f"  - {acct.username} (plan: {acct.plan}, usage: {acct.premium_used}/{limit_str})")
     print(f"\nStarting server on http://{host}:{port}")
     print(f"  POST /v1/chat/completions                       (OpenAI)")
     print(f"  POST /v1/responses                              (OpenAI)")
@@ -319,17 +310,16 @@ def serve(config_path: str | None, host: str | None, port: int | None,
 
     if workers > 1:
         # Workers initialize via the lifespan event using env vars
-        # Format: "token1:username1:plan1:quota1,token2:username2:plan2:quota2"
+        # Format: "token1:username1:plan1:quota1:usage1,..."
         parts = []
         for acct in accounts:
             limit_str = str(acct["quota_limit"]) if acct["quota_limit"] is not None else ""
-            parts.append(f"{acct['token']}:{acct['username']}:{acct['plan']}:{limit_str}")
+            used_str = str(acct["premium_used"]) if acct["premium_used"] else ""
+            parts.append(f"{acct['token']}:{acct['username']}:{acct['plan']}:{limit_str}:{used_str}")
         os.environ["_COPILOT_ADAPTER_GITHUB_TOKENS"] = ",".join(parts)
         os.environ["_COPILOT_ADAPTER_STRATEGY"] = strategy
         if quota_limit is not None:
             os.environ["_COPILOT_ADAPTER_QUOTA_LIMIT"] = str(quota_limit)
-        if local_tracking:
-            os.environ["_COPILOT_ADAPTER_LOCAL_TRACKING"] = "1"
         os.environ["_COPILOT_ADAPTER_PLAN"] = plan
         if cors_origin:
             os.environ["_COPILOT_ADAPTER_CORS_ORIGINS"] = ",".join(cors_origin)
