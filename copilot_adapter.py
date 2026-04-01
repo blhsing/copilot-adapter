@@ -153,7 +153,7 @@ def accounts(add_token: str | None, remove_username: str | None,
         usage = fetch_usage(acct["token"], acct["username"]) if acct["valid"] else None
         usage_str = f"{usage:.0f}" if usage is not None else "?"
         print(f"  - {acct['username']} ({status}, plan: {plan}, usage: {usage_str}/{quota_str})")
-    print("\nNote: Usage requires a PAT with the 'copilot' scope. "
+    print("\nNote: Usage requires a PAT with the 'user' scope. "
           "Device-flow tokens show '?'.")
 
 
@@ -296,7 +296,7 @@ def serve(config_path: str | None, host: str | None, port: int | None,
     if strategy == "min-usage" and not local_tracking:
         click.echo(click.style(
             "Warning: min-usage strategy without --local-tracking requires the "
-            "GitHub billing API, which needs a PAT with the 'copilot' scope. "
+            "GitHub billing API, which needs a PAT with the 'user' scope. "
             "Device-flow tokens cannot access billing data. "
             "Add --local-tracking for accurate usage-based rotation.",
             fg="yellow",
