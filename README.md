@@ -22,7 +22,7 @@ Authenticates via a GitHub Personal Access Token (PAT) or GitHub's device flow, 
 
 - Python 3.10+
 - pip
-- A [GitHub Copilot](https://github.com/features/copilot) subscription (Individual, Business, or Enterprise)
+- A GitHub account with [GitHub Copilot](https://github.com/features/copilot) access (the free tier works; paid plans provide higher premium request quotas)
 
 ## Setup
 
