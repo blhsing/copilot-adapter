@@ -85,7 +85,7 @@ def login():
 
 
 @main.command()
-@click.option("--username", default=None,
+@click.option("--username", default=None, metavar="USER",
               help="Remove a specific account by GitHub username.")
 @click.option("--all", "remove_all", is_flag=True,
               help="Remove all stored credentials.")
@@ -99,18 +99,18 @@ def logout(username: str | None, remove_all: bool):
 
 
 @main.command()
-@click.option("--add", "add_token", default=None,
+@click.option("--add", "add_token", default=None, metavar="TOKEN",
               help="Add a GitHub PAT to the cached accounts.")
-@click.option("--remove", "remove_username", default=None,
+@click.option("--remove", "remove_username", default=None, metavar="USER",
               help="Remove a cached account by username.")
-@click.option("--update", "update_username", default=None,
+@click.option("--update", "update_username", default=None, metavar="USER",
               help="Update settings for a cached account by username.")
 @click.option("--plan", "update_plan", default=None,
               type=click.Choice(list(_VALID_PLANS)),
               help="Set the Copilot plan for the account.")
-@click.option("--quota-limit", "update_quota", default=None, type=int,
+@click.option("--quota-limit", "update_quota", default=None, type=int, metavar="N",
               help="Set the monthly premium request quota for the account.")
-@click.option("--usage", "update_usage", default=None, type=float,
+@click.option("--usage", "update_usage", default=None, type=float, metavar="N",
               help="Set the current premium request usage for the account.")
 def accounts(add_token: str | None, remove_username: str | None,
              update_username: str | None, update_plan: str | None,
@@ -164,26 +164,29 @@ def accounts(add_token: str | None, remove_username: str | None,
 
 
 @main.command()
-@click.option("--config", "config_path", default=None,
+@click.option("--config", "config_path", default=None, metavar="PATH",
               envvar="COPILOT_ADAPTER_CONFIG",
               help=f"Path to JSON config file (default: {_DEFAULT_CONFIG}).")
-@click.option("--host", default=None, envvar="COPILOT_ADAPTER_HOST",
+@click.option("--host", default=None, envvar="COPILOT_ADAPTER_HOST", metavar="HOST",
               help="Host to bind to.")
-@click.option("--port", default=None, type=int, envvar="COPILOT_ADAPTER_PORT",
+@click.option("--port", default=None, type=int, envvar="COPILOT_ADAPTER_PORT", metavar="PORT",
               help="Port to bind to.")
 @click.option("--github-token", multiple=True, envvar="COPILOT_ADAPTER_GITHUB_TOKEN",
+              metavar="TOKEN",
               help="GitHub PAT (repeatable, supports TOKEN:PLAN:QUOTA:USAGE format). "
                    "Env var supports comma-separated values.")
 @click.option("--cors-origin", multiple=True, envvar="COPILOT_ADAPTER_CORS_ORIGIN",
+              metavar="ORIGIN",
               help="Allowed CORS origin (repeatable). Use '*' to allow all origins.")
 @click.option("--workers", default=None, type=int, envvar="COPILOT_ADAPTER_WORKERS",
+              metavar="N",
               help=f"Number of worker processes (default: number of CPUs, {_NUM_CPUS}).")
 @click.option("--strategy", default=None,
               type=click.Choice(["max-usage", "min-usage", "round-robin"]),
               envvar="COPILOT_ADAPTER_STRATEGY",
               help="Account rotation strategy (default: max-usage).")
 @click.option("--quota-limit", default=None, type=int,
-              envvar="COPILOT_ADAPTER_QUOTA_LIMIT",
+              envvar="COPILOT_ADAPTER_QUOTA_LIMIT", metavar="N",
               help="Default monthly premium request limit per account (default: 300).")
 @click.option("--plan", default=None,
               type=click.Choice(list(_VALID_PLANS)),
