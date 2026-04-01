@@ -97,6 +97,10 @@ def logout(username: str | None, remove_all: bool):
 
 
 @main.command()
+@click.option("--add", "add_token", default=None,
+              help="Add a GitHub PAT to the cached accounts.")
+@click.option("--remove", "remove_username", default=None,
+              help="Remove a cached account by username.")
 @click.option("--update", "update_username", default=None,
               help="Update plan/quota for a cached account by username.")
 @click.option("--plan", "update_plan", default=None,
@@ -104,10 +108,25 @@ def logout(username: str | None, remove_all: bool):
               help="Set the Copilot plan for the account.")
 @click.option("--quota-limit", "update_quota", default=None, type=int,
               help="Set the monthly premium request quota for the account.")
-def accounts(update_username: str | None, update_plan: str | None,
+def accounts(add_token: str | None, remove_username: str | None,
+             update_username: str | None, update_plan: str | None,
              update_quota: int | None):
-    """List all cached device-flow accounts, or update one with --update."""
-    from lib.auth import fetch_usage, list_accounts, update_account
+    """Manage cached accounts: list, add, remove, or update."""
+    from lib.auth import (add_account, fetch_usage, list_accounts,
+                          remove_account, update_account)
+
+    if add_token:
+        result = add_account(add_token, plan=update_plan, quota_limit=update_quota)
+        if result is None:
+            raise click.ClickException("Invalid token — could not authenticate with GitHub")
+        print(f"Added {result['username']} (plan: {result['plan']}, quota: {result['quota_limit']})")
+        return
+
+    if remove_username:
+        if not remove_account(remove_username):
+            raise click.ClickException(f"Account '{remove_username}' not found in cache")
+        print(f"Removed {remove_username}")
+        return
 
     if update_username:
         if update_plan is None and update_quota is None:
@@ -134,6 +153,8 @@ def accounts(update_username: str | None, update_plan: str | None,
         usage = fetch_usage(acct["token"], acct["username"]) if acct["valid"] else None
         usage_str = f"{usage:.0f}" if usage is not None else "?"
         print(f"  - {acct['username']} ({status}, plan: {plan}, usage: {usage_str}/{quota_str})")
+    print("\nNote: Usage requires a PAT with the 'copilot' scope. "
+          "Device-flow tokens show '?'.")
 
 
 @main.command()
@@ -271,6 +292,15 @@ def serve(config_path: str | None, host: str | None, port: int | None,
         asyncio.run(acct_mgr.verify_all())
     except Exception as e:
         raise click.ClickException(f"Failed to get Copilot token: {e}")
+
+    if strategy == "min-usage" and not local_tracking:
+        click.echo(click.style(
+            "Warning: min-usage strategy without --local-tracking requires the "
+            "GitHub billing API, which needs a PAT with the 'copilot' scope. "
+            "Device-flow tokens cannot access billing data. "
+            "Add --local-tracking for accurate usage-based rotation.",
+            fg="yellow",
+        ), err=True)
 
     n = len(accounts)
     print(f"\nConfigured {n} account(s), strategy: {strategy}")
