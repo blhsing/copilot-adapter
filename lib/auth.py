@@ -3,6 +3,7 @@
 import json
 import threading
 import time
+import asyncio
 import webbrowser
 from pathlib import Path
 
@@ -248,32 +249,33 @@ class CopilotTokenManager:
         self.github_token = github_token
         self._copilot_token: str | None = None
         self._expires_at: float = 0
-        self._lock = threading.Lock()
+        self._lock = asyncio.Lock()
 
-    def get_token(self) -> str:
+    async def get_token(self) -> str:
         """Return a valid Copilot token, refreshing if needed."""
         if self._copilot_token and time.time() < self._expires_at - 300:
             return self._copilot_token
 
-        with self._lock:
-            # Double-check after acquiring the lock — another thread may
+        async with self._lock:
+            # Double-check after acquiring the lock
             # have already refreshed while we were waiting.
             if self._copilot_token and time.time() < self._expires_at - 300:
                 return self._copilot_token
 
-            r = httpx.get(
-                "https://api.github.com/copilot_internal/v2/token",
-                headers={
-                    "authorization": f"token {self.github_token}",
-                    **HEADERS_BASE,
-                },
-            )
-            if r.status_code == 401:
-                raise RuntimeError(
-                    "GitHub token rejected. Run `copilot-api login` again."
+            async with httpx.AsyncClient() as client:
+                r = await client.get(
+                    "https://api.github.com/copilot_internal/v2/token",
+                    headers={
+                        "authorization": f"token {self.github_token}",
+                        **HEADERS_BASE,
+                    },
                 )
-            r.raise_for_status()
-            data = r.json()
+                if r.status_code == 401:
+                    raise RuntimeError(
+                        "GitHub token rejected. Run `copilot-api login` again."
+                    )
+                r.raise_for_status()
+                data = r.json()
 
             self._copilot_token = data["token"]
             self._expires_at = data["expires_at"]

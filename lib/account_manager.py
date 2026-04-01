@@ -1,7 +1,7 @@
 """Multi-account management with rotation strategies."""
 
 import logging
-import threading
+import asyncio
 import time
 from dataclasses import dataclass, field
 
@@ -108,7 +108,7 @@ class AccountManager:
         self._strategy = strategy
         self._local_tracking = local_tracking
         self._plan = plan
-        self._lock = threading.Lock()
+        self._lock = asyncio.Lock()
         self._rr_index = -1
         self._last_user_account: AccountInfo | None = None
 
@@ -132,12 +132,12 @@ class AccountManager:
     def strategy(self) -> str:
         return self._strategy
 
-    def verify_all(self) -> None:
+    async def verify_all(self) -> None:
         """Verify all accounts can obtain a Copilot token."""
         for acct in self._accounts:
-            acct.token_manager.get_token()
+            await acct.token_manager.get_token()
 
-    def get_client(self, initiator: str = "user") -> CopilotClient:
+    async def get_client(self, initiator: str = "user") -> CopilotClient:
         """Return the CopilotClient to use for this request.
 
         For ``"agent"`` initiator, returns the same client as the most recent
@@ -146,15 +146,15 @@ class AccountManager:
         When local tracking is enabled, call :meth:`record_usage` after the
         request to account for the model's premium request multiplier.
         """
-        with self._lock:
+        async with self._lock:
             if initiator == "agent" and self._last_user_account is not None:
                 return self._last_user_account.client
 
-            acct = self._select_by_strategy()
+            acct = await self._select_by_strategy()
             self._last_user_account = acct
             return acct.client
 
-    def record_usage(self, client: CopilotClient, model: str) -> None:
+    async def record_usage(self, client: CopilotClient, model: str) -> None:
         """Record a premium request for the account owning *client*.
 
         Only has an effect when local tracking is enabled. Uses the model's
@@ -166,7 +166,7 @@ class AccountManager:
         multiplier = get_model_multiplier(model, self._plan)
         if multiplier == 0:
             return
-        with self._lock:
+        async with self._lock:
             for acct in self._accounts:
                 if acct.client is client:
                     acct.premium_used += multiplier
@@ -178,38 +178,38 @@ class AccountManager:
                         )
                     break
 
-    def mark_exhausted(self, client: CopilotClient) -> None:
+    async def mark_exhausted(self, client: CopilotClient) -> None:
         """Mark the account associated with *client* as exhausted."""
-        with self._lock:
+        async with self._lock:
             for acct in self._accounts:
                 if acct.client is client:
                     acct.exhausted = True
                     logger.warning("Account %s marked as exhausted", acct.username)
                     break
 
-    def get_fallback_client(self, failed_client: CopilotClient) -> CopilotClient | None:
+    async def get_fallback_client(self, failed_client: CopilotClient) -> CopilotClient | None:
         """Return the next non-exhausted client after marking *failed_client* exhausted."""
-        self.mark_exhausted(failed_client)
-        with self._lock:
+        await self.mark_exhausted(failed_client)
+        async with self._lock:
             available = [a for a in self._accounts if not a.exhausted]
             if not available:
                 return None
             return available[0].client
 
-    def refresh_quota(self, acct: AccountInfo) -> None:
+    async def refresh_quota(self, acct: AccountInfo) -> None:
         """Fetch premium request usage from the GitHub billing API."""
         if time.time() - acct.last_quota_check < QUOTA_REFRESH_INTERVAL:
             return
         try:
-            r = httpx.get(
-                f"https://api.github.com/users/{acct.username}/settings/billing/premium_request/usage",
-                headers={
-                    "authorization": f"token {acct.token}",
-                    "accept": "application/vnd.github+json",
-                    "x-github-api-version": "2026-03-10",
-                },
-                timeout=30,
-            )
+            async with httpx.AsyncClient(timeout=30) as client:
+                r = await client.get(
+                    f"https://api.github.com/users/{acct.username}/settings/billing/premium_request/usage",
+                    headers={
+                        "authorization": f"token {acct.token}",
+                        "accept": "application/vnd.github+json",
+                        "x-github-api-version": "2026-03-10",
+                    },
+                )
             if r.status_code == 200:
                 data = r.json()
                 total = sum(
@@ -232,19 +232,19 @@ class AccountManager:
             logger.debug("Failed to fetch quota for %s", acct.username, exc_info=True)
         acct.last_quota_check = time.time()
 
-    def refresh_all_quotas(self) -> None:
+    async def refresh_all_quotas(self) -> None:
         """Refresh quota data for all accounts."""
         for acct in self._accounts:
-            self.refresh_quota(acct)
+            await self.refresh_quota(acct)
 
-    def _sync_usage_if_needed(self, available: list[AccountInfo]) -> None:
+    async def _sync_usage_if_needed(self, available: list[AccountInfo]) -> None:
         """Sync usage data from billing API unless local tracking is active."""
         if self._local_tracking:
             return
         for acct in available:
-            self.refresh_quota(acct)
+            await self.refresh_quota(acct)
 
-    def _select_by_strategy(self) -> AccountInfo:
+    async def _select_by_strategy(self) -> AccountInfo:
         """Apply the configured rotation strategy. Must be called with lock held."""
         available = [a for a in self._accounts if not a.exhausted]
         if not available:
@@ -254,7 +254,7 @@ class AccountManager:
 
         # Sync usage for usage-based strategies (no-op if local tracking)
         if self._strategy in ("max-usage", "min-usage"):
-            self._sync_usage_if_needed(available)
+            await self._sync_usage_if_needed(available)
             # Re-filter after refresh (some may have become exhausted)
             available = [a for a in self._accounts if not a.exhausted]
             if not available:
