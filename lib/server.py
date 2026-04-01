@@ -149,6 +149,8 @@ async def handle_chat_completion(
                 async for line in client.stream_chat_completions(
                     openai_body, initiator=resolved
                 ):
+                    if request and await request.is_disconnected():
+                        return
                     if line.startswith("error:"):
                         if _is_rate_limit_error(line):
                             logger.warning(
@@ -286,6 +288,8 @@ async def responses(request: Request):
                 first_chunk = True
                 needs_retry = False
                 async for line in client.stream_responses(body, initiator=initiator):
+                    if request and await request.is_disconnected():
+                        return
                     if line.startswith("error:"):
                         if _is_rate_limit_error(line):
                             logger.warning("Rate limited on account, switching account")
