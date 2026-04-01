@@ -245,18 +245,47 @@ def logout(username: str | None = None) -> None:
 
 
 def list_accounts() -> list[dict]:
-    """Return cached accounts with validity status, plan, and quota."""
+    """Return cached accounts with validity status, plan, quota, and usage."""
     accounts = _load_github_tokens()
     result = []
     for acct in accounts:
-        username = _validate_github_token(acct["github_token"])
-        result.append({
+        token = acct["github_token"]
+        username = _validate_github_token(token)
+        entry = {
             "username": acct["username"],
             "valid": username is not None,
             "plan": acct.get("plan"),
             "quota_limit": acct.get("quota_limit"),
-        })
+            "token": token,
+        }
+        result.append(entry)
     return result
+
+
+def fetch_usage(token: str, username: str) -> float | None:
+    """Fetch premium request usage from the GitHub billing API.
+
+    Returns the total premium requests used this month, or None on failure.
+    """
+    try:
+        r = httpx.get(
+            f"https://api.github.com/users/{username}/settings/billing/premium_request/usage",
+            headers={
+                "authorization": f"token {token}",
+                "accept": "application/vnd.github+json",
+                "x-github-api-version": "2026-03-10",
+            },
+            timeout=30,
+        )
+        if r.status_code == 200:
+            data = r.json()
+            return sum(
+                item.get("netQuantity", 0)
+                for item in data.get("usageItems", [])
+            )
+    except Exception:
+        pass
+    return None
 
 
 def update_account(username: str, *, plan: str | None = None,
