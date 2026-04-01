@@ -142,10 +142,15 @@ def accounts(update_username: str | None, update_plan: str | None,
               type=click.Choice(list(_VALID_PLANS)),
               envvar="COPILOT_ADAPTER_PLAN",
               help="Default Copilot plan type for premium request multipliers (default: pro).")
+@click.option("--log-level", default=None,
+              type=click.Choice(["debug", "info", "warning", "error"], case_sensitive=False),
+              envvar="COPILOT_ADAPTER_LOG_LEVEL",
+              help="Logging level (default: warning). Use 'debug' or 'info' for verbose output.")
 def serve(config_path: str | None, host: str | None, port: int | None,
           github_token: tuple[str, ...], cors_origin: tuple[str, ...],
           workers: int | None, strategy: str | None,
-          quota_limit: int | None, local_tracking: bool, plan: str | None):
+          quota_limit: int | None, local_tracking: bool, plan: str | None,
+          log_level: str | None):
     """Start the OpenAI-compatible API server."""
     import uvicorn
 
@@ -163,6 +168,7 @@ def serve(config_path: str | None, host: str | None, port: int | None,
     strategy = strategy or cfg.get("strategy", "max-usage")
     quota_limit = quota_limit if quota_limit is not None else cfg.get("quota_limit")
     plan = plan or cfg.get("plan", "pro")
+    log_level = log_level or cfg.get("log_level", "warning")
     if not local_tracking:
         local_tracking = cfg.get("local_tracking", False)
     if not cors_origin:
@@ -275,11 +281,11 @@ def serve(config_path: str | None, host: str | None, port: int | None,
             os.environ["_COPILOT_ADAPTER_CORS_ORIGINS"] = ",".join(cors_origin)
         uvicorn.run(
             "lib.server:app", host=host, port=port,
-            workers=workers, log_level="info",
+            workers=workers, log_level=log_level,
         )
     else:
         application = init_app(acct_mgr, cors_origins=list(cors_origin) or None)
-        uvicorn.run(application, host=host, port=port, log_level="info")
+        uvicorn.run(application, host=host, port=port, log_level=log_level)
 
 
 if __name__ == "__main__":
