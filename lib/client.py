@@ -19,9 +19,9 @@ class CopilotClient:
     def __init__(self, token_manager: CopilotTokenManager):
         self._token_manager = token_manager
 
-    def _headers(self, initiator: str = "user") -> dict[str, str]:
+    async def _headers(self, initiator: str = "user") -> dict[str, str]:
         return {
-            "authorization": f"Bearer {self._token_manager.get_token()}",
+            "authorization": f"Bearer {await self._token_manager.get_token()}",
             "content-type": "application/json",
             "accept": "*/*",
             "editor-version": "vscode/1.95.0",
@@ -42,7 +42,7 @@ class CopilotClient:
         async with httpx.AsyncClient(timeout=120) as client:
             return await client.post(
                 f"{COPILOT_API}/chat/completions",
-                headers=self._headers(initiator),
+                headers=await self._headers(initiator),
                 json=body,
             )
 
@@ -53,7 +53,7 @@ class CopilotClient:
             async with client.stream(
                 "POST",
                 f"{COPILOT_API}/chat/completions",
-                headers=self._headers(initiator),
+                headers=await self._headers(initiator),
                 json=body,
             ) as response:
                 if response.status_code != 200:
@@ -69,7 +69,7 @@ class CopilotClient:
         async with httpx.AsyncClient(timeout=120) as client:
             return await client.post(
                 f"{COPILOT_API}/responses",
-                headers=self._headers(initiator),
+                headers=await self._headers(initiator),
                 json=body,
             )
 
@@ -80,7 +80,7 @@ class CopilotClient:
             async with client.stream(
                 "POST",
                 f"{COPILOT_API}/responses",
-                headers=self._headers(initiator),
+                headers=await self._headers(initiator),
                 json=body,
             ) as response:
                 if response.status_code != 200:
@@ -93,7 +93,7 @@ class CopilotClient:
     async def list_models(self) -> httpx.Response:
         async with httpx.AsyncClient(timeout=30) as client:
             return await client.get(
-                f"{COPILOT_API}/models", headers=self._headers()
+                f"{COPILOT_API}/models", headers=await self._headers()
             )
 
     async def embeddings(
@@ -102,6 +102,6 @@ class CopilotClient:
         async with httpx.AsyncClient(timeout=60) as client:
             return await client.post(
                 f"{COPILOT_API}/embeddings",
-                headers=self._headers(initiator),
+                headers=await self._headers(initiator),
                 json=body,
             )

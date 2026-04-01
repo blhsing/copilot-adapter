@@ -315,7 +315,7 @@ async def embeddings(request: Request):
 async def messages(request: Request):
     body = await request.json()
     return await handle_chat_completion(
-        anthropic_adapter, body, initiator=_get_initiator(request)
+        anthropic_adapter, body, request=request, initiator=_get_initiator(request)
     )
 
 
@@ -355,7 +355,7 @@ async def gemini_generate_content(model_id: str, request: Request):
     body = await request.json()
     adapter = GeminiAdapter(model_id)
     return await handle_chat_completion(
-        adapter, body, initiator=_get_initiator(request)
+        adapter, body, request=request, initiator=_get_initiator(request)
     )
 
 
@@ -376,6 +376,8 @@ async def gemini_stream_generate_content(model_id: str, request: Request):
         async for line in client.stream_chat_completions(
             openai_body, initiator=resolved
         ):
+            if await request.is_disconnected():
+                return
             if line.startswith("error:"):
                 yield converter.format_error(line)
                 return
@@ -389,13 +391,15 @@ async def gemini_stream_generate_content(model_id: str, request: Request):
                             "quota likely exhausted, switching account",
                             requested_model, resp_model,
                         )
-                        fallback = account_mgr.get_fallback_client(client)
+                        fallback = await account_mgr.get_fallback_client(client)
                         if fallback is not None:
                             client = fallback
                             converter = adapter.create_stream_converter(body)
                             async for retry_line in client.stream_chat_completions(
                                 openai_body, initiator=resolved
                             ):
+                                if await request.is_disconnected():
+                                    return
                                 if retry_line.startswith("error:"):
                                     yield converter.format_error(retry_line)
                                     return
