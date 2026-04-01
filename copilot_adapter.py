@@ -316,6 +316,13 @@ def serve(config_path: str | None, host: str | None, port: int | None,
     LOGGING_CONFIG["formatters"]["default"]["fmt"] = "%(asctime)s - %(levelprefix)s %(message)s"
     LOGGING_CONFIG["formatters"]["access"]["fmt"] = '%(asctime)s - %(levelprefix)s %(client_addr)s - "%(request_line)s" %(status_code)s'
 
+    # Route 'lib' logger to Uvicorn's default handler so logger.info works
+    LOGGING_CONFIG["loggers"]["lib"] = {
+        "handlers": ["default"],
+        "level": log_level.upper(),
+        "propagate": False
+    }
+
     if workers > 1:
         # Workers initialize via the lifespan event using env vars
         # Format: "token1:username1:plan1:quota1:usage1,..."
