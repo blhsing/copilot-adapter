@@ -97,8 +97,9 @@ def serve(host: str, port: int, github_token: tuple[str, ...],
     )
 
     # Verify all accounts can get a Copilot token
+    import asyncio
     try:
-        acct_mgr.verify_all()
+        asyncio.run(acct_mgr.verify_all())
     except Exception as e:
         raise click.ClickException(f"Failed to get Copilot token: {e}")
 
