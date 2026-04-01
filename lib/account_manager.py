@@ -42,12 +42,26 @@ _PAID_MULTIPLIERS: dict[str, float] = {
 _FREE_MULTIPLIERS: dict[str, float] = {}  # empty = all default to 1
 
 PLAN_MULTIPLIERS: dict[str, dict[str, float]] = {
-    "paid": _PAID_MULTIPLIERS,
     "free": _FREE_MULTIPLIERS,
+    "pro": _PAID_MULTIPLIERS,
+    "pro+": _PAID_MULTIPLIERS,
+    "business": _PAID_MULTIPLIERS,
+    "enterprise": _PAID_MULTIPLIERS,
 }
 
+# Default monthly premium request quota per plan.
+PLAN_QUOTAS: dict[str, int] = {
+    "free": 50,
+    "pro": 300,
+    "pro+": 1500,
+    "business": 300,
+    "enterprise": 1000,
+}
 
-def get_model_multiplier(model: str, plan: str = "paid") -> float:
+VALID_PLANS = tuple(PLAN_MULTIPLIERS.keys())
+
+
+def get_model_multiplier(model: str, plan: str = "pro") -> float:
     """Return the premium request multiplier for a model.
 
     Uses prefix matching to handle date-suffixed model IDs
@@ -77,6 +91,7 @@ class AccountInfo:
     username: str
     token_manager: CopilotTokenManager
     client: CopilotClient
+    plan: str = "paid"
     premium_used: float = 0
     premium_limit: int | None = None  # None = unknown (no --quota-limit)
     exhausted: bool = False
@@ -94,11 +109,11 @@ class AccountManager:
 
     def __init__(
         self,
-        accounts: list[tuple[str, str]],
+        accounts: list[tuple[str, str]] | list[dict],
         strategy: str = "max-usage",
         quota_limit: int | None = None,
         local_tracking: bool = False,
-        plan: str = "paid",
+        plan: str = "pro",
     ):
         if strategy not in self.STRATEGIES:
             raise ValueError(f"Unknown strategy: {strategy!r}")
@@ -113,7 +128,19 @@ class AccountManager:
         self._last_user_account: AccountInfo | None = None
 
         self._accounts: list[AccountInfo] = []
-        for token, username in accounts:
+        for acct in accounts:
+            if isinstance(acct, dict):
+                token = acct["token"]
+                username = acct["username"]
+                acct_plan = acct.get("plan", plan)
+                acct_limit = acct.get("quota_limit", quota_limit)
+            else:
+                token, username = acct
+                acct_plan = plan
+                acct_limit = quota_limit
+            # Default quota limit from plan if not explicitly set
+            if acct_limit is None:
+                acct_limit = PLAN_QUOTAS.get(acct_plan)
             tm = CopilotTokenManager(token)
             client = CopilotClient(tm)
             self._accounts.append(AccountInfo(
@@ -121,7 +148,8 @@ class AccountManager:
                 username=username,
                 token_manager=tm,
                 client=client,
-                premium_limit=quota_limit,
+                plan=acct_plan,
+                premium_limit=acct_limit,
             ))
 
     @property
@@ -163,12 +191,12 @@ class AccountManager:
         """
         if not self._local_tracking:
             return
-        multiplier = get_model_multiplier(model, self._plan)
-        if multiplier == 0:
-            return
         async with self._lock:
             for acct in self._accounts:
                 if acct.client is client:
+                    multiplier = get_model_multiplier(model, acct.plan)
+                    if multiplier == 0:
+                        return
                     acct.premium_used += multiplier
                     if acct.premium_limit is not None and acct.premium_used >= acct.premium_limit:
                         acct.exhausted = True

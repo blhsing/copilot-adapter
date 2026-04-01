@@ -60,6 +60,21 @@ def _load_github_tokens() -> list[dict]:
     return []
 
 
+def get_cached_account_meta() -> dict[str, dict]:
+    """Return a mapping of token → {plan, quota_limit} from the token cache."""
+    meta: dict[str, dict] = {}
+    for acct in _load_github_tokens():
+        token = acct.get("github_token", "")
+        entry: dict = {}
+        if "plan" in acct:
+            entry["plan"] = acct["plan"]
+        if "quota_limit" in acct:
+            entry["quota_limit"] = acct["quota_limit"]
+        if entry:
+            meta[token] = entry
+    return meta
+
+
 def resolve_github_tokens(explicit_tokens: list[str] | None = None) -> list[tuple[str, str]]:
     """Return a list of (token, username) tuples from all available sources.
 
@@ -180,11 +195,22 @@ def device_flow_login() -> str:
         # Add to cache (deduplicate by token)
         username = _validate_github_token(token)
         if username:
+            print(f"Logged in as {username}")
+
+            # Prompt for plan and quota
+            plan = input("Copilot plan [free/pro/pro+/business/enterprise] (pro): ").strip() or "pro"
+            default_quota = {"free": "50", "pro": "300", "pro+": "1500",
+                             "business": "300", "enterprise": "1000"}.get(plan, "300")
+            quota_str = input(f"Monthly premium request quota ({default_quota}): ").strip()
+            quota_limit = int(quota_str) if quota_str else int(default_quota)
+
             accounts = _load_github_tokens()
             accounts = [a for a in accounts if a["github_token"] != token]
-            accounts.append({"github_token": token, "username": username})
+            accounts.append({
+                "github_token": token, "username": username,
+                "plan": plan, "quota_limit": quota_limit,
+            })
             _save_github_tokens(accounts)
-            print(f"Logged in as {username}")
             _print_cached_accounts(accounts)
         return token
 
