@@ -133,6 +133,17 @@ def _is_rate_limit_error(line: str) -> bool:
     return line.startswith("error: 429")
 
 
+def _debug_error(request_body: dict, response_body: str | dict) -> None:
+    """Log full request and response bodies at DEBUG level on errors."""
+    if not logger.isEnabledFor(logging.DEBUG):
+        return
+    logger.debug("Error request body: %s", json.dumps(request_body, ensure_ascii=False))
+    if isinstance(response_body, dict):
+        logger.debug("Error response body: %s", json.dumps(response_body, ensure_ascii=False))
+    else:
+        logger.debug("Error response body: %s", response_body)
+
+
 async def handle_chat_completion(
     adapter: FormatAdapter, body: dict, *, request: Request | None = None, initiator: str | None = None
 ):
@@ -170,6 +181,7 @@ async def handle_chat_completion(
                                 converter = adapter.create_stream_converter(body)
                                 needs_retry = True
                                 break
+                        _debug_error(body, line)
                         yield converter.format_error(line)
                         return
 
@@ -216,6 +228,7 @@ async def handle_chat_completion(
 
         if resp.status_code != 200:
             logger.error("API error %s: %s", resp.status_code, resp.text)
+            _debug_error(body, resp.text)
             try:
                 content = resp.json()
             except Exception:
@@ -308,6 +321,7 @@ async def responses(request: Request):
                                 converter = openai_adapter.create_stream_converter(body)
                                 needs_retry = True
                                 break
+                        _debug_error(body, line)
                         yield converter.format_error(line)
                         return
                     if first_chunk:
@@ -350,6 +364,7 @@ async def responses(request: Request):
 
         if resp.status_code != 200:
             logger.error("API error %s: %s", resp.status_code, resp.text)
+            _debug_error(body, resp.text)
             try:
                 content = resp.json()
             except Exception:
@@ -399,6 +414,7 @@ async def embeddings(request: Request):
         content = {"error": {"message": resp.text}}
     if resp.status_code != 200:
         logger.error("API error %s: %s", resp.status_code, resp.text)
+        _debug_error(body, resp.text)
     return JSONResponse(content=content, status_code=resp.status_code)
 
 
@@ -522,6 +538,7 @@ async def gemini_stream_generate_content(model_id: str, request: Request):
                             converter = adapter.create_stream_converter(body)
                             needs_retry = True
                             break
+                    _debug_error(body, line)
                     yield converter.format_error(line)
                     return
                 if first_chunk:
