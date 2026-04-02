@@ -4,7 +4,7 @@ import asyncio
 import logging
 from dataclasses import dataclass, field
 
-from lib.auth import CopilotTokenManager
+from lib.auth import CopilotTokenManager, update_account
 from lib.client import CopilotClient
 
 logger = logging.getLogger(__name__)
@@ -178,8 +178,11 @@ class AccountManager:
         """Record a premium request for the account owning *client*.
 
         Uses the model's multiplier (based on the configured plan) to
-        accurately track premium request consumption.
+        accurately track premium request consumption.  Persists the
+        updated usage to the on-disk token cache.
         """
+        username = None
+        usage = 0.0
         async with self._lock:
             for acct in self._accounts:
                 if acct.client is client:
@@ -187,6 +190,8 @@ class AccountManager:
                     if multiplier == 0:
                         return
                     acct.premium_used += multiplier
+                    username = acct.username
+                    usage = acct.premium_used
                     if acct.premium_limit is not None and acct.premium_used >= acct.premium_limit:
                         acct.exhausted = True
                         logger.info(
@@ -194,6 +199,8 @@ class AccountManager:
                             acct.username, acct.premium_used, acct.premium_limit,
                         )
                     break
+        if username is not None:
+            update_account(username, premium_used=usage)
 
     async def mark_exhausted(self, client: CopilotClient) -> None:
         """Mark the account associated with *client* as exhausted."""
