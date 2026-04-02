@@ -140,10 +140,11 @@ async def handle_chat_completion(
     openai_body = adapter.convert_chat_request(body)
     requested_model = openai_body.get("model", "")
 
-    billed_status = "yes" if resolved == "user" else "no"
-    logger.info("Chat completion requested by %s (billed: %s, model: %s)", resolved, billed_status, requested_model)
-
     client = await account_mgr.get_client(initiator=resolved)
+    account = account_mgr.get_username(client)
+
+    billed_status = "yes" if resolved == "user" else "no"
+    logger.info("Chat completion requested by %s (billed: %s, model: %s, account: %s)", resolved, billed_status, requested_model, account)
 
     if adapter.is_streaming(body) or openai_body.get("stream"):
         converter = adapter.create_stream_converter(body)
@@ -281,10 +282,11 @@ async def responses(request: Request):
     initiator = _get_initiator(request) or "user"
     requested_model = body.get("model", "")
 
-    billed_status = "yes" if initiator == "user" else "no"
-    logger.info("Responses requested by %s (billed: %s, model: %s)", initiator, billed_status, requested_model)
-
     client = await account_mgr.get_client(initiator=initiator)
+    account = account_mgr.get_username(client)
+
+    billed_status = "yes" if initiator == "user" else "no"
+    logger.info("Responses requested by %s (billed: %s, model: %s, account: %s)", initiator, billed_status, requested_model, account)
 
     if body.get("stream"):
         converter = openai_adapter.create_stream_converter(body)
@@ -377,6 +379,11 @@ async def embeddings(request: Request):
     body = await request.json()
     initiator = _get_initiator(request) or "user"
     client = await account_mgr.get_client(initiator=initiator)
+    account = account_mgr.get_username(client)
+    model = body.get("model", "")
+
+    billed_status = "yes" if initiator == "user" else "no"
+    logger.info("Embeddings requested by %s (billed: %s, model: %s, account: %s)", initiator, billed_status, model, account)
     while True:
         resp = await client.embeddings(body, initiator=initiator)
         if resp.status_code == 429:
@@ -489,6 +496,11 @@ async def gemini_stream_generate_content(model_id: str, request: Request):
     openai_body["stream"] = True
     requested_model = openai_body.get("model", "")
     client = await account_mgr.get_client(initiator=resolved)
+    account = account_mgr.get_username(client)
+
+    billed_status = "yes" if resolved == "user" else "no"
+    logger.info("Chat completion requested by %s (billed: %s, model: %s, account: %s)", resolved, billed_status, requested_model, account)
+
     converter = adapter.create_stream_converter(body)
 
     async def event_stream():
