@@ -1,9 +1,12 @@
 """Google Gemini API format adapter."""
 
 import json
+import logging
 import uuid
 
 from .base import FormatAdapter, StreamConverter
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -352,8 +355,28 @@ class GeminiAdapter(FormatAdapter):
         contents = body.get("contents", [])
         if not contents:
             return "user"
+
         last_parts = contents[-1].get("parts", [])
         for part in last_parts:
             if "functionResponse" in part:
+                logger.debug("infer_initiator: functionResponse in last turn -> agent")
                 return "agent"
+
+        # Prior tool activity means this is an agentic follow-up.
+        for turn in contents:
+            for part in turn.get("parts", []):
+                if "functionCall" in part or "functionResponse" in part:
+                    logger.debug(
+                        "infer_initiator: prior function call/response in history, "
+                        "last turn role=%s -> agent",
+                        contents[-1].get("role"),
+                    )
+                    return "agent"
+
+        logger.debug(
+            "infer_initiator: no tool activity detected, %d turns, "
+            "last role=%s -> user",
+            len(contents),
+            contents[-1].get("role"),
+        )
         return "user"

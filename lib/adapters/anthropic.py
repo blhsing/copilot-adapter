@@ -1,9 +1,12 @@
 """Anthropic Messages API format adapter."""
 
 import json
+import logging
 import uuid
 
 from .base import FormatAdapter, StreamConverter
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -401,10 +404,39 @@ class AnthropicAdapter(FormatAdapter):
         messages = body.get("messages", [])
         if not messages:
             return "user"
+
+        # Check if the last message directly contains tool_result blocks.
         last = messages[-1]
         content = last.get("content")
         if isinstance(content, list):
             for block in content:
                 if block.get("type") == "tool_result":
+                    logger.debug("infer_initiator: tool_result in last message -> agent")
                     return "agent"
+
+        # Check conversation history for prior tool interactions.  If the
+        # model has already used tools in this conversation, a subsequent
+        # user text message is almost certainly an agentic follow-up (e.g.
+        # subagent spawn, auto-continue, post-compact).
+        for msg in messages:
+            if msg.get("role") != "assistant":
+                continue
+            c = msg.get("content")
+            if isinstance(c, list):
+                for block in c:
+                    if block.get("type") == "tool_use":
+                        logger.debug(
+                            "infer_initiator: prior tool_use found in history, "
+                            "last message role=%s content_type=%s -> agent",
+                            last.get("role"),
+                            type(content).__name__,
+                        )
+                        return "agent"
+
+        logger.debug(
+            "infer_initiator: no tool activity detected, %d messages, "
+            "last role=%s -> user",
+            len(messages),
+            last.get("role"),
+        )
         return "user"
