@@ -1,6 +1,10 @@
 """OpenAI format adapter (passthrough)."""
 
+import logging
+
 from .base import FormatAdapter, StreamConverter
+
+logger = logging.getLogger(__name__)
 
 
 class _OpenAIStreamConverter(StreamConverter):
@@ -41,6 +45,35 @@ class OpenAIAdapter(FormatAdapter):
 
     def infer_initiator(self, body: dict) -> str:
         messages = body.get("messages", [])
-        if messages and messages[-1].get("role") == "tool":
+        if not messages:
+            return "user"
+
+        if messages[-1].get("role") == "tool":
+            logger.debug("infer_initiator: last message role=tool -> agent")
             return "agent"
+
+        # Prior tool activity means this is an agentic follow-up.
+        for msg in messages:
+            role = msg.get("role")
+            if role == "tool":
+                logger.debug(
+                    "infer_initiator: prior tool message in history, "
+                    "last role=%s -> agent",
+                    messages[-1].get("role"),
+                )
+                return "agent"
+            if role == "assistant" and msg.get("tool_calls"):
+                logger.debug(
+                    "infer_initiator: prior tool_calls in history, "
+                    "last role=%s -> agent",
+                    messages[-1].get("role"),
+                )
+                return "agent"
+
+        logger.debug(
+            "infer_initiator: no tool activity detected, %d messages, "
+            "last role=%s -> user",
+            len(messages),
+            messages[-1].get("role"),
+        )
         return "user"
