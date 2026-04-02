@@ -156,6 +156,13 @@ class AccountManager:
     def strategy(self) -> str:
         return self._strategy
 
+    def get_username(self, client: CopilotClient) -> str:
+        """Return the username for the account owning *client*."""
+        for acct in self._accounts:
+            if acct.client is client:
+                return acct.username
+        return "unknown"
+
     async def verify_all(self) -> None:
         """Verify all accounts can obtain a Copilot token."""
         for acct in self._accounts:
