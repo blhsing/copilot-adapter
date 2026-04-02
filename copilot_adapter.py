@@ -359,11 +359,13 @@ def serve(config_path: str | None, host: str | None, port: int | None,
         uvicorn.run(
             "lib.server:app", host=host, port=port,
             workers=workers, log_level=log_level,
+            timeout_graceful_shutdown=5,
             use_colors=_supports_color(),
         )
     else:
         application = init_app(acct_mgr, cors_origins=list(cors_origin) or None, force_free=force_free)
         uvicorn.run(application, host=host, port=port, log_level=log_level,
+                    timeout_graceful_shutdown=5,
                     use_colors=_supports_color())
 
 
