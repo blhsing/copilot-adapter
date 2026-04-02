@@ -14,6 +14,7 @@ from .account_manager import AccountManager
 logger = logging.getLogger(__name__)
 
 account_mgr: AccountManager | None = None
+_force_free: bool = False
 openai_adapter = OpenAIAdapter()
 anthropic_adapter = AnthropicAdapter()
 
@@ -54,8 +55,10 @@ def _extract_model_from_sse_line(line: str) -> str | None:
 async def _lifespan(application: FastAPI):
     """Initialize the AccountManager in each worker process on startup."""
     global account_mgr
+    global _force_free
     tokens_raw = os.environ.get("_COPILOT_ADAPTER_GITHUB_TOKENS", "")
     if tokens_raw and account_mgr is None:
+        _force_free = os.environ.get("_COPILOT_ADAPTER_FREE", "") == "1"
         # Format: "token1:username1:plan1:quota1:usage1,..."
         strategy = os.environ.get("_COPILOT_ADAPTER_STRATEGY", "max-usage")
         quota_limit_raw = os.environ.get("_COPILOT_ADAPTER_QUOTA_LIMIT", "")
@@ -94,10 +97,12 @@ app = FastAPI(title="Copilot API", version="0.1.0", lifespan=_lifespan)
 
 
 def init_app(
-    mgr: AccountManager, cors_origins: list[str] | None = None
+    mgr: AccountManager, cors_origins: list[str] | None = None,
+    force_free: bool = False,
 ) -> FastAPI:
-    global account_mgr
+    global account_mgr, _force_free
     account_mgr = mgr
+    _force_free = force_free
 
     if cors_origins:
         from fastapi.middleware.cors import CORSMiddleware
@@ -118,6 +123,8 @@ def init_app(
 
 def _get_initiator(request: Request) -> str | None:
     """Extract X-Initiator from the incoming request, or None if absent."""
+    if _force_free:
+        return "agent"
     return request.headers.get("x-initiator")
 
 

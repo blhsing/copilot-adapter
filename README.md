@@ -152,6 +152,7 @@ Example `~/.copilot-adapter.json`:
   "port": 18080,
   "strategy": "max-usage",
   "plan": "pro",
+  "free": false,
   "workers": 4,
   "cors_origins": ["*"],
   "accounts": [
@@ -186,6 +187,7 @@ All CLI options can be set via environment variables:
 | `--quota-limit` | `COPILOT_ADAPTER_QUOTA_LIMIT` | per plan |
 | `--plan` | `COPILOT_ADAPTER_PLAN` | `pro` |
 | `--log-level` | `COPILOT_ADAPTER_LOG_LEVEL` | `info` |
+| `--free` | `COPILOT_ADAPTER_FREE` | *(off)* |
 
 Set `NO_COLOR=1` to disable colored log output. Colors are auto-detected on Windows (requires Windows Terminal or VT-enabled console).
 
@@ -255,14 +257,24 @@ GitHub Copilot uses the `X-Initiator` header to determine whether an API call co
 
 The proxy handles this automatically. When no `X-Initiator` header is provided by the caller, it inspects the request body and infers the correct value:
 
-- **OpenAI format** — `agent` if the last message has `role: "tool"`
-- **Anthropic format** — `agent` if the last message contains a `tool_result` content block
-- **Gemini format** — `agent` if the last turn contains a `functionResponse` part
+- **OpenAI format** — `agent` if the last message has `role: "tool"`, or if any prior message contains tool calls or tool responses
+- **Anthropic format** — `agent` if the last message contains a `tool_result` content block, or if any prior assistant message contains a `tool_use` block
+- **Gemini format** — `agent` if the last turn contains a `functionResponse` part, or if any prior turn contains a `functionCall` or `functionResponse`
 - Otherwise — `user`
 
-This means agentic clients like Claude Code that make multiple API calls per user turn (tool-use loops, retries) will only consume one premium request for the initial prompt — follow-up calls with tool results are automatically marked as `agent`. No client-side changes needed.
+This means agentic clients like Claude Code that make multiple API calls per user turn (tool-use loops, retries, subagent spawns, auto-continues) will only consume one premium request for the initial prompt — follow-up calls are automatically marked as `agent`. No client-side changes needed.
 
 Callers can also pass `X-Initiator` explicitly to override the heuristic.
+
+### Free mode
+
+Use `--free` to mark **all** requests as agent-initiated, so nothing counts as a premium request:
+
+```bash
+python copilot_adapter.py serve --free
+```
+
+This is useful when you want to avoid all premium billing regardless of request type. Note that GitHub Copilot may throttle or deprioritize agent-initiated requests compared to user-initiated ones.
 
 When using multi-account rotation, agent-initiated requests always stay on the same account as the preceding user request to avoid billing a premium request on a different account.
 
