@@ -24,6 +24,14 @@ def _make_manager(n: int = 3, strategy: str = "round-robin", quota_limit=None,
     return mgr
 
 
+def _acct_for_client(mgr: AccountManager, client) -> AccountInfo:
+    """Return the AccountInfo that owns *client*."""
+    for acct in mgr._accounts:
+        if acct.client is client:
+            return acct
+    raise ValueError("client not found")
+
+
 class TestRoundRobin:
     async def test_cycles_through_accounts(self):
         mgr = _make_manager(3, "round-robin")
@@ -164,54 +172,55 @@ class TestUsageTracking:
         mgr = _make_manager(2, "max-usage")
         client = await mgr.get_client("user")
         await mgr.record_usage(client, "claude-opus-4.6")  # 3x
-        assert mgr._accounts[0].premium_used == 3.0
+        assert _acct_for_client(mgr, client).premium_used == 3.0
 
     async def test_record_usage_zero_multiplier_model(self):
         mgr = _make_manager(2, "max-usage")
         client = await mgr.get_client("user")
         await mgr.record_usage(client, "gpt-4o")  # 0x
-        assert mgr._accounts[0].premium_used == 0
+        assert _acct_for_client(mgr, client).premium_used == 0
 
     async def test_record_usage_fractional_multiplier(self):
         mgr = _make_manager(2, "max-usage")
         client = await mgr.get_client("user")
         await mgr.record_usage(client, "claude-haiku-4.5")  # 0.33x
-        assert mgr._accounts[0].premium_used == pytest.approx(0.33)
+        assert _acct_for_client(mgr, client).premium_used == pytest.approx(0.33)
 
     async def test_record_usage_unknown_model_defaults_to_1(self):
         mgr = _make_manager(2, "max-usage")
         client = await mgr.get_client("user")
         await mgr.record_usage(client, "some-future-model")
-        assert mgr._accounts[0].premium_used == 1.0
+        assert _acct_for_client(mgr, client).premium_used == 1.0
 
     async def test_record_usage_prefix_match(self):
         mgr = _make_manager(2, "max-usage")
         client = await mgr.get_client("user")
         await mgr.record_usage(client, "gpt-4o-2024-07-18")  # matches gpt-4o → 0x
-        assert mgr._accounts[0].premium_used == 0
+        assert _acct_for_client(mgr, client).premium_used == 0
 
     async def test_exhausts_at_quota_limit(self):
         mgr = _make_manager(2, "max-usage", quota_limit=5)
         client = await mgr.get_client("user")
+        acct = _acct_for_client(mgr, client)
         await mgr.record_usage(client, "claude-opus-4.6")  # 3x → 3
-        client = await mgr.get_client("user")  # still account 0 (3 < 5)
+        client = await mgr.get_client("user")  # still same account (3 < 5)
         await mgr.record_usage(client, "claude-opus-4.6")  # 3x → 6 ≥ 5 → exhausted
-        assert mgr._accounts[0].exhausted is True
-        # Next user request should go to account 1
-        client = await mgr.get_client("user")
-        assert client is mgr._accounts[1].client
+        assert acct.exhausted is True
+        # Next user request should go to the other account
+        client2 = await mgr.get_client("user")
+        assert client2 is not client
 
     async def test_free_plan_all_models_cost_1(self):
         mgr = _make_manager(2, "max-usage", plan="free")
         client = await mgr.get_client("user")
         await mgr.record_usage(client, "gpt-4o")  # 0x on paid, 1x on free
-        assert mgr._accounts[0].premium_used == 1.0
+        assert _acct_for_client(mgr, client).premium_used == 1.0
 
     async def test_paid_plan_included_models_cost_0(self):
         mgr = _make_manager(2, "max-usage", plan="pro")
         client = await mgr.get_client("user")
         await mgr.record_usage(client, "gpt-4o")  # 0x on paid
-        assert mgr._accounts[0].premium_used == 0
+        assert _acct_for_client(mgr, client).premium_used == 0
 
 
 class TestValidation:

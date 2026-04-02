@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import random
 from dataclasses import dataclass, field
 
 from lib.auth import CopilotTokenManager, update_account
@@ -251,7 +252,11 @@ class AccountManager:
             )
 
         if self._strategy == "max-usage":
-            return max(available, key=lambda a: a.premium_used)
+            target = max(a.premium_used for a in available)
+            tied = [a for a in available if a.premium_used == target]
+            return random.choice(tied)
 
         # min-usage
-        return min(available, key=lambda a: a.premium_used)
+        target = min(a.premium_used for a in available)
+        tied = [a for a in available if a.premium_used == target]
+        return random.choice(tied)
