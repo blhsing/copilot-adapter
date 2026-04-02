@@ -196,11 +196,14 @@ def accounts(add_token: str | None, remove_username: str | None,
               type=click.Choice(["debug", "info", "warning", "error"], case_sensitive=False),
               envvar="COPILOT_ADAPTER_LOG_LEVEL",
               help="Logging level (default: info). Use 'debug' for verbose output.")
+@click.option("--free", "force_free", is_flag=True, default=False,
+              envvar="COPILOT_ADAPTER_FREE",
+              help="Mark all requests as agent-initiated so nothing counts as a premium request.")
 def serve(config_path: str | None, host: str | None, port: int | None,
           github_token: tuple[str, ...], cors_origin: tuple[str, ...],
           workers: int | None, strategy: str | None,
           quota_limit: int | None, plan: str | None,
-          log_level: str | None):
+          log_level: str | None, force_free: bool):
     """Start the OpenAI-compatible API server."""
     import uvicorn
 
@@ -219,6 +222,7 @@ def serve(config_path: str | None, host: str | None, port: int | None,
     quota_limit = quota_limit if quota_limit is not None else cfg.get("quota_limit")
     plan = plan or cfg.get("plan", "pro")
     log_level = log_level or cfg.get("log_level", "info")
+    force_free = force_free or cfg.get("free", False)
     if not cors_origin:
         cors_origin = tuple(cfg.get("cors_origins", []))
 
@@ -301,6 +305,8 @@ def serve(config_path: str | None, host: str | None, port: int | None,
     for acct in acct_mgr.accounts:
         limit_str = str(acct.premium_limit) if acct.premium_limit is not None else "unset"
         print(f"  - {acct.username} (plan: {acct.plan}, usage: {acct.premium_used}/{limit_str})")
+    if force_free:
+        print("\n** Free mode enabled: all requests will be marked as agent-initiated **")
     print(f"\nStarting server on http://{host}:{port}")
     print(f"  POST /v1/chat/completions                       (OpenAI)")
     print(f"  POST /v1/responses                              (OpenAI)")
@@ -338,6 +344,8 @@ def serve(config_path: str | None, host: str | None, port: int | None,
         os.environ["_COPILOT_ADAPTER_PLAN"] = plan
         if cors_origin:
             os.environ["_COPILOT_ADAPTER_CORS_ORIGINS"] = ",".join(cors_origin)
+        if force_free:
+            os.environ["_COPILOT_ADAPTER_FREE"] = "1"
 
         # Custom log config to suppress repetitive per-worker lifespan messages
         from uvicorn.config import LOGGING_CONFIG
@@ -354,7 +362,7 @@ def serve(config_path: str | None, host: str | None, port: int | None,
             use_colors=_supports_color(),
         )
     else:
-        application = init_app(acct_mgr, cors_origins=list(cors_origin) or None)
+        application = init_app(acct_mgr, cors_origins=list(cors_origin) or None, force_free=force_free)
         uvicorn.run(application, host=host, port=port, log_level=log_level,
                     use_colors=_supports_color())
 
