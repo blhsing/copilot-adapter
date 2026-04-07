@@ -12,7 +12,7 @@ Authenticates via a GitHub Personal Access Token (PAT) or GitHub's device flow, 
 - **Rate limit handling** — Automatically retries on rate limit errors by rotating to the next available account
 - **Three API formats** — Serves OpenAI, Anthropic, and Gemini endpoints simultaneously
 - **Forward proxy mode** — Acts as an HTTP/HTTPS proxy that intercepts Copilot API traffic and rewrites billing headers, so any client that supports `HTTPS_PROXY` can benefit without reconfiguration
-- **Configurable model mapping** — Glob-pattern-based model name rewriting via a shipped `model_map.json`, CLI flags, env vars, or config file
+- **Configurable model mapping** — Glob-pattern-based model name rewriting, with sensible defaults for Claude models
 - **Streaming support** — Full SSE streaming across all three formats, including real-time format translation
 - **Flexible authentication** — Supports multiple GitHub PATs, environment variables, cached tokens, and interactive device-flow OAuth, with automatic fallback
 - **Multi-worker support** — Spawns multiple worker processes for higher throughput
@@ -160,7 +160,8 @@ Example `~/.config/copilot-api/config.json`:
   "cors_origins": ["*"],
   "model_map": {
     "*sonnet*": "claude-sonnet-4.6",
-    "*opus*": "claude-opus-4.6"
+    "*opus*": "claude-opus-4.6",
+    "*haiku*": "claude-haiku-4.5"
   },
   "accounts": [
     {"token": "ghp_aaa", "plan": "enterprise", "quota_limit": 1000, "premium_used": 250},
@@ -197,7 +198,6 @@ All CLI options can be set via environment variables:
 | `--free` | `COPILOT_ADAPTER_FREE` | *(off)* |
 | `--proxy` | `COPILOT_ADAPTER_PROXY` | *(off)* |
 | `--ca-dir` | `COPILOT_ADAPTER_CA_DIR` | `~/.config/copilot-api` |
-| `--model-map` | `COPILOT_ADAPTER_MODEL_MAP` | `model_map.json` |
 
 Set `NO_COLOR=1` to disable colored log output. Colors are auto-detected on Windows (requires Windows Terminal or VT-enabled console).
 
@@ -311,35 +311,21 @@ This mode is useful when you want to transparently reduce premium billing for an
 
 ### Model mapping
 
-Model names in incoming requests are rewritten using configurable glob patterns before being sent to the Copilot API. This handles mismatches between model names that clients send (e.g. `claude-3-5-sonnet-latest`) and the names Copilot expects (e.g. `claude-sonnet-4.6`).
+Model names in incoming requests are rewritten using configurable glob patterns before being sent to the Copilot API. This is necessary because Copilot uses dotted version numbers for Claude models (e.g. `claude-sonnet-4.6`) while clients like Claude Code send hyphenated names (e.g. `claude-sonnet-4-6`, `claude-3-5-sonnet-latest`). Without mapping, these requests fail with `model_not_supported`.
 
-The project ships with a default `model_map.json`:
+The project ships with default mappings in `model_map.json`:
 
 ```json
 {
   "*sonnet*": "claude-sonnet-4.6",
-  "*opus*": "claude-opus-4.6"
+  "*opus*": "claude-opus-4.6",
+  "*haiku*": "claude-haiku-4.5"
 }
 ```
 
 Patterns use glob syntax (`*` matches anything) and are checked in order — the first match wins. If no pattern matches, the model name is passed through unchanged.
 
-**Override via CLI** (repeatable, replaces the defaults entirely):
-
-```bash
-python copilot_adapter.py serve \
-  --model-map "*sonnet*=claude-sonnet-4.6" \
-  --model-map "*opus*=claude-opus-4.6" \
-  --model-map "*haiku*=claude-haiku-4.5"
-```
-
-**Override via environment variable** (comma-separated):
-
-```bash
-export COPILOT_ADAPTER_MODEL_MAP="*sonnet*=claude-sonnet-4.6,*opus*=claude-opus-4.6"
-```
-
-**Override via config file:**
+To override, add a `model_map` object to the [config file](#config-file):
 
 ```json
 {
@@ -352,9 +338,7 @@ export COPILOT_ADAPTER_MODEL_MAP="*sonnet*=claude-sonnet-4.6,*opus*=claude-opus-
 }
 ```
 
-**Precedence**: CLI/env > config file > shipped `model_map.json`.
-
-Model mapping is applied to all endpoints (chat completions, responses, embeddings, Gemini).
+When `model_map` is present in the config file, it replaces the shipped defaults entirely. Model mapping is applied to all endpoints (chat completions, responses, embeddings, Gemini).
 
 ## Client configuration
 

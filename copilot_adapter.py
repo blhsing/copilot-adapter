@@ -209,18 +209,12 @@ def accounts(add_token: str | None, remove_username: str | None,
               envvar="COPILOT_ADAPTER_CA_DIR",
               help="Directory for the MITM CA certificate and key "
                    "(default: ~/.config/copilot-api).")
-@click.option("--model-map", multiple=True,
-              envvar="COPILOT_ADAPTER_MODEL_MAP",
-              metavar="PATTERN=TARGET",
-              help="Model name mapping as glob PATTERN=TARGET (repeatable). "
-                   "Env var supports comma-separated values. "
-                   "Overrides the default model_map.json when specified.")
 def serve(config_path: str | None, host: str | None, port: int | None,
           github_token: tuple[str, ...], cors_origin: tuple[str, ...],
           workers: int | None, strategy: str | None,
           quota_limit: int | None, plan: str | None,
           log_level: str | None, force_free: bool, proxy_mode: bool,
-          ca_dir: str | None, model_map: tuple[str, ...]):
+          ca_dir: str | None):
     """Start the OpenAI-compatible API server."""
     import uvicorn
 
@@ -247,20 +241,9 @@ def serve(config_path: str | None, host: str | None, port: int | None,
     if not cors_origin:
         cors_origin = tuple(cfg.get("cors_origins", []))
 
-    # --- Model map: CLI/env > config file > shipped model_map.json ---
-    from lib.server import load_default_model_map
+    # --- Model map: config file > shipped model_map.json ---
     model_map_list: list[tuple[str, str]] | None = None
-    if model_map:
-        # CLI/env: parse PATTERN=TARGET entries (supports comma-separated in env)
-        model_map_list = []
-        for raw in model_map:
-            for entry in raw.split(","):
-                entry = entry.strip()
-                if "=" in entry:
-                    pat, _, tgt = entry.partition("=")
-                    model_map_list.append((pat, tgt))
-    elif "model_map" in cfg:
-        # Config file: dict of {pattern: target}
+    if "model_map" in cfg:
         model_map_list = list(cfg["model_map"].items())
     # Otherwise None → init_app will load the shipped default
 
