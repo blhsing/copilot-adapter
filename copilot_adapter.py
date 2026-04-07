@@ -209,12 +209,17 @@ def accounts(add_token: str | None, remove_username: str | None,
               envvar="COPILOT_ADAPTER_CA_DIR",
               help="Directory for the MITM CA certificate and key "
                    "(default: ~/.config/copilot-api).")
+@click.option("--model-map", "model_map_raw", multiple=True, metavar="PATTERN=TARGET",
+              envvar="COPILOT_ADAPTER_MODEL_MAP",
+              help="Model mapping as pattern=target (repeatable, e.g. "
+                   "'--model-map *sonnet*=claude-sonnet-4.6'). "
+                   "Env var supports comma-separated values.")
 def serve(config_path: str | None, host: str | None, port: int | None,
           github_token: tuple[str, ...], cors_origin: tuple[str, ...],
           workers: int | None, strategy: str | None,
           quota_limit: int | None, plan: str | None,
           log_level: str | None, force_free: bool, proxy_mode: bool,
-          ca_dir: str | None):
+          ca_dir: str | None, model_map_raw: tuple[str, ...]):
     """Start the OpenAI-compatible API server."""
     import uvicorn
 
@@ -241,9 +246,17 @@ def serve(config_path: str | None, host: str | None, port: int | None,
     if not cors_origin:
         cors_origin = tuple(cfg.get("cors_origins", []))
 
-    # --- Model map: config file > shipped model_map.json ---
+    # --- Model map: CLI/env > config file > shipped model_map.json ---
     model_map_list: list[tuple[str, str]] | None = None
-    if "model_map" in cfg:
+    if model_map_raw:
+        model_map_list = []
+        for raw in model_map_raw:
+            for entry in raw.split(","):
+                entry = entry.strip()
+                if "=" in entry:
+                    pat, _, tgt = entry.partition("=")
+                    model_map_list.append((pat, tgt))
+    elif "model_map" in cfg:
         model_map_list = list(cfg["model_map"].items())
     # Otherwise None → init_app will load the shipped default
 

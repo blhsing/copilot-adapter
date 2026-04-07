@@ -198,6 +198,7 @@ All CLI options can be set via environment variables:
 | `--free` | `COPILOT_ADAPTER_FREE` | *(off)* |
 | `--proxy` | `COPILOT_ADAPTER_PROXY` | *(off)* |
 | `--ca-dir` | `COPILOT_ADAPTER_CA_DIR` | `~/.config/copilot-api` |
+| `--model-map` | `COPILOT_ADAPTER_MODEL_MAP` | shipped `model_map.json` |
 
 Set `NO_COLOR=1` to disable colored log output. Colors are auto-detected on Windows (requires Windows Terminal or VT-enabled console).
 
@@ -325,20 +326,33 @@ The project ships with default mappings in `model_map.json`:
 
 Patterns use glob syntax (`*` matches anything) and are checked in order — the first match wins. If no pattern matches, the model name is passed through unchanged.
 
-To override, add a `model_map` object to the [config file](#config-file):
+To override, use any of these methods (highest precedence first):
 
-```json
-{
-  "model_map": {
-    "*sonnet*": "claude-sonnet-4.6",
-    "*opus*": "claude-opus-4.6",
-    "*haiku*": "claude-haiku-4.5",
-    "gpt-4-turbo": "gpt-4-0125-preview"
-  }
-}
-```
+1. **CLI / env var** — repeatable `--model-map` flag or comma-separated env var:
 
-When `model_map` is present in the config file, it replaces the shipped defaults entirely. Model mapping is applied to all endpoints (chat completions, responses, embeddings, Gemini).
+   ```bash
+   python copilot_adapter.py serve \
+     --model-map '*sonnet*=claude-sonnet-4.6' \
+     --model-map '*opus*=claude-opus-4.6'
+
+   # Or via environment variable (comma-separated)
+   export COPILOT_ADAPTER_MODEL_MAP='*sonnet*=claude-sonnet-4.6,*opus*=claude-opus-4.6'
+   ```
+
+2. **Config file** — add a `model_map` object to the [config file](#config-file):
+
+   ```json
+   {
+     "model_map": {
+       "*sonnet*": "claude-sonnet-4.6",
+       "*opus*": "claude-opus-4.6",
+       "*haiku*": "claude-haiku-4.5",
+       "gpt-4-turbo": "gpt-4-0125-preview"
+     }
+   }
+   ```
+
+Any override replaces the shipped defaults entirely. Model mapping is applied to all endpoints (chat completions, responses, embeddings, Gemini).
 
 ## Client configuration
 
