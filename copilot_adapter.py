@@ -164,6 +164,35 @@ def accounts(add_token: str | None, remove_username: str | None,
         print(f"  - {acct['username']} ({status}, plan: {plan}, usage: {usage}/{quota_str})")
 
 
+@main.command("ca-cert")
+@click.option("--ca-dir", default=None, metavar="DIR",
+              envvar="COPILOT_ADAPTER_CA_DIR",
+              help="Directory for the CA certificate and key "
+                   "(default: ~/.config/copilot-api).")
+def ca_cert(ca_dir: str | None):
+    """Generate or show the MITM CA certificate.
+
+    If the CA does not exist yet it is created automatically.
+    Prints the path to the CA certificate for use with NODE_EXTRA_CA_CERTS
+    or system trust stores.
+    """
+    from lib.cert import ca_paths, ensure_ca
+
+    d = Path(ca_dir) if ca_dir else None
+    cert, _ = ensure_ca(d)
+    cert_path, _ = ca_paths(d)
+
+    subject = cert.subject.rfc4514_string()
+    not_before = cert.not_valid_before_utc.strftime("%Y-%m-%d")
+    not_after = cert.not_valid_after_utc.strftime("%Y-%m-%d")
+
+    print(f"CA certificate: {cert_path}")
+    print(f"  Subject:  {subject}")
+    print(f"  Valid:    {not_before} to {not_after}")
+    print(f"\nTo trust this CA in Node.js clients:")
+    print(f"  export NODE_EXTRA_CA_CERTS={cert_path}")
+
+
 @main.command()
 @click.option("--config", "config_path", default=None, metavar="PATH",
               envvar="COPILOT_ADAPTER_CONFIG",
