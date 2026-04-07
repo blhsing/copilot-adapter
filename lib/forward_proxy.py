@@ -409,7 +409,27 @@ async def _handle_connect(host: str, port: int,
     """Handle a CONNECT tunnel request."""
     # Consume remaining headers
     await _read_headers(reader)
+    await _do_connect(host, port, reader, writer, ca_cert, ca_key,
+                      internal_host, internal_port)
 
+
+async def _handle_connect_pre_read(host: str, port: int,
+                                   reader: asyncio.StreamReader,
+                                   writer: asyncio.StreamWriter,
+                                   ca_cert, ca_key,
+                                   internal_host: str = "127.0.0.1",
+                                   internal_port: int = 0):
+    """Handle a CONNECT request when headers have already been consumed."""
+    await _do_connect(host, port, reader, writer, ca_cert, ca_key,
+                      internal_host, internal_port)
+
+
+async def _do_connect(host: str, port: int,
+                      reader: asyncio.StreamReader,
+                      writer: asyncio.StreamWriter,
+                      ca_cert, ca_key,
+                      internal_host: str, internal_port: int):
+    """Core CONNECT handling after headers are consumed."""
     # Respond 200
     writer.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
     await writer.drain()
@@ -441,6 +461,23 @@ async def _handle_plain_http(method: bytes, url: bytes, version: bytes,
                              reader: asyncio.StreamReader,
                              writer: asyncio.StreamWriter):
     """Handle a plain HTTP request with an absolute URL (forward proxy)."""
+    headers = await _read_headers(reader)
+    await _do_plain_http(method, url, version, headers, reader, writer)
+
+
+async def _handle_plain_http_pre_read(method: bytes, url: bytes, version: bytes,
+                                      headers: list[tuple[bytes, bytes]],
+                                      reader: asyncio.StreamReader,
+                                      writer: asyncio.StreamWriter):
+    """Handle a plain HTTP request when headers have already been consumed."""
+    await _do_plain_http(method, url, version, headers, reader, writer)
+
+
+async def _do_plain_http(method: bytes, url: bytes, version: bytes,
+                         headers: list[tuple[bytes, bytes]],
+                         reader: asyncio.StreamReader,
+                         writer: asyncio.StreamWriter):
+    """Core plain HTTP forward proxy handling."""
     parsed = urlparse(url)
     host = parsed.hostname or b""
     port = parsed.port or 80
@@ -453,7 +490,6 @@ async def _handle_plain_http(method: bytes, url: bytes, version: bytes,
     else:
         host_str = host
 
-    headers = await _read_headers(reader)
     body = await _read_body(reader, headers)
 
     # Rewrite request line to use relative path
@@ -490,6 +526,8 @@ class DualModeServer:
 
     def __init__(self, asgi_app, *, host: str, port: int,
                  ca_dir: Path | None = None,
+                 proxy_user: str | None = None,
+                 proxy_password: str | None = None,
                  uvicorn_log_level: str = "info",
                  uvicorn_use_colors: bool = True,
                  timeout_graceful_shutdown: int = 5):
@@ -500,6 +538,15 @@ class DualModeServer:
         self._uvicorn_log_level = uvicorn_log_level
         self._uvicorn_use_colors = uvicorn_use_colors
         self._timeout = timeout_graceful_shutdown
+
+        # Proxy auth
+        self._proxy_auth: str | None = None
+        if proxy_user and proxy_password:
+            import base64
+            cred = base64.b64encode(
+                f"{proxy_user}:{proxy_password}".encode()
+            ).decode()
+            self._proxy_auth = cred
 
         # CA for MITM
         self._ca_cert, self._ca_key = ensure_ca(ca_dir)
@@ -565,6 +612,55 @@ class DualModeServer:
             return
 
         method = parts[0].upper()
+        is_forward_proxy = (
+            method == b"CONNECT"
+            or parts[1].startswith(b"http://")
+            or parts[1].startswith(b"https://")
+        )
+
+        # Check proxy auth for forward proxy requests
+        if is_forward_proxy and self._proxy_auth is not None:
+            # Read headers to find Proxy-Authorization
+            headers = await _read_headers(reader)
+            authed = False
+            for name, value in headers:
+                if name.lower() == b"proxy-authorization":
+                    # Expected: Basic <base64>
+                    auth_parts = value.split(None, 1)
+                    if (len(auth_parts) == 2
+                            and auth_parts[0].lower() == b"basic"
+                            and auth_parts[1].decode("ascii", errors="replace") == self._proxy_auth):
+                        authed = True
+                    break
+            if not authed:
+                writer.write(
+                    b"HTTP/1.1 407 Proxy Authentication Required\r\n"
+                    b"Proxy-Authenticate: Basic realm=\"copilot-adapter\"\r\n"
+                    b"\r\n"
+                )
+                await writer.drain()
+                writer.close()
+                return
+
+            # Headers already consumed; dispatch with them
+            if method == b"CONNECT":
+                target = parts[1].decode("ascii", errors="replace")
+                if ":" in target:
+                    host, port_str = target.rsplit(":", 1)
+                    port = int(port_str)
+                else:
+                    host = target
+                    port = 443
+                # _handle_connect normally reads headers itself; pass pre-read
+                await _handle_connect_pre_read(host, port, reader, writer,
+                                               self._ca_cert, self._ca_key,
+                                               self._internal_host, self._internal_port)
+            else:
+                await _handle_plain_http_pre_read(
+                    method, parts[1],
+                    parts[2] if len(parts) > 2 else b"HTTP/1.1",
+                    headers, reader, writer)
+            return
 
         if method == b"CONNECT":
             # CONNECT host:port HTTP/1.1
