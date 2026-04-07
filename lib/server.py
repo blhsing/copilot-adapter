@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 account_mgr: AccountManager | None = None
 _force_free: bool = False
 _model_map: list[tuple[str, str]] = []
+_api_tokens: set[str] | None = None
 openai_adapter = OpenAIAdapter()
 anthropic_adapter = AnthropicAdapter()
 
@@ -80,6 +81,7 @@ async def _lifespan(application: FastAPI):
     global account_mgr
     global _force_free
     global _model_map
+    global _api_tokens
     tokens_raw = os.environ.get("_COPILOT_ADAPTER_GITHUB_TOKENS", "")
     if tokens_raw and account_mgr is None:
         _force_free = os.environ.get("_COPILOT_ADAPTER_FREE", "") == "1"
@@ -124,6 +126,10 @@ async def _lifespan(application: FastAPI):
                 allow_methods=["*"],
                 allow_headers=["*"],
             )
+
+        api_tokens_raw = os.environ.get("_COPILOT_ADAPTER_API_TOKENS", "")
+        if api_tokens_raw:
+            _api_tokens = set(api_tokens_raw.split(","))
     yield
 
 
@@ -134,11 +140,13 @@ def init_app(
     mgr: AccountManager, cors_origins: list[str] | None = None,
     force_free: bool = False,
     model_map: list[tuple[str, str]] | None = None,
+    api_tokens: list[str] | None = None,
 ) -> FastAPI:
-    global account_mgr, _force_free, _model_map
+    global account_mgr, _force_free, _model_map, _api_tokens
     account_mgr = mgr
     _force_free = force_free
     _model_map = model_map if model_map is not None else load_default_model_map()
+    _api_tokens = set(api_tokens) if api_tokens else None
 
     if cors_origins:
         from fastapi.middleware.cors import CORSMiddleware
@@ -151,6 +159,25 @@ def init_app(
         )
 
     return app
+
+
+@app.middleware("http")
+async def _check_api_token(request: Request, call_next):
+    """Reject requests without a valid Bearer token when API tokens are configured."""
+    if _api_tokens is None:
+        return await call_next(request)
+    # Allow health check without auth
+    if request.url.path == "/":
+        return await call_next(request)
+    auth = request.headers.get("authorization", "")
+    if auth.startswith("Bearer "):
+        token = auth[7:]
+        if token in _api_tokens:
+            return await call_next(request)
+    return JSONResponse(
+        status_code=401,
+        content={"error": {"message": "Invalid or missing API token"}},
+    )
 
 
 # ---------------------------------------------------------------------------

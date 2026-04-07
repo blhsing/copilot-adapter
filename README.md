@@ -156,6 +156,8 @@ Example `~/.config/copilot-api/config.json`:
   "plan": "pro",
   "free": false,
   "proxy": false,
+  "proxy_user": "myuser",
+  "proxy_password": "mypassword",
   "workers": 4,
   "cors_origins": ["*"],
   "model_map": {
@@ -163,6 +165,7 @@ Example `~/.config/copilot-api/config.json`:
     "*opus*": "claude-opus-4.6",
     "*haiku*": "claude-haiku-4.5"
   },
+  "api_tokens": ["sk-abc123...", "sk-def456..."],
   "accounts": [
     {"token": "ghp_aaa", "plan": "enterprise", "quota_limit": 1000, "premium_used": 250},
     {"token": "ghp_bbb", "plan": "free"},
@@ -199,6 +202,9 @@ All CLI options can be set via environment variables:
 | `--proxy` | `COPILOT_ADAPTER_PROXY` | *(off)* |
 | `--ca-dir` | `COPILOT_ADAPTER_CA_DIR` | `~/.config/copilot-api` |
 | `--model-map` | `COPILOT_ADAPTER_MODEL_MAP` | shipped `model_map.json` |
+| `--proxy-user` | `COPILOT_ADAPTER_PROXY_USER` | *(none)* |
+| `--proxy-password` | `COPILOT_ADAPTER_PROXY_PASSWORD` | *(none)* |
+| `--api-token` | `COPILOT_ADAPTER_API_TOKEN` | stored tokens |
 
 Set `NO_COLOR=1` to disable colored log output. Colors are auto-detected on Windows (requires Windows Terminal or VT-enabled console).
 
@@ -367,6 +373,56 @@ To override, use any of these methods (highest precedence first):
    ```
 
 Any override replaces the shipped defaults entirely. Model mapping is applied to all endpoints (chat completions, responses, embeddings, Gemini).
+
+## Authentication
+
+### API token protection
+
+Protect the reverse API proxy with Bearer tokens so only authorized clients can use it:
+
+```bash
+# Generate a token
+python copilot_adapter.py tokens --generate
+python copilot_adapter.py tokens --generate --label "my-laptop"
+
+# List tokens
+python copilot_adapter.py tokens
+
+# Revoke a token by value or label
+python copilot_adapter.py tokens --revoke sk-abc123...
+python copilot_adapter.py tokens --revoke my-laptop
+```
+
+Once tokens exist (via `tokens --generate`, `--api-token` flag, or `api_tokens` in the config file), all API endpoints except the health check (`GET /`) require `Authorization: Bearer <token>`:
+
+```bash
+# Start with stored tokens (generated via `tokens --generate`)
+python copilot_adapter.py serve
+
+# Or pass tokens explicitly
+python copilot_adapter.py serve --api-token sk-abc123...
+
+# Client usage
+curl -H "Authorization: Bearer sk-abc123..." http://127.0.0.1:18080/v1/models
+```
+
+If no tokens are configured, the API is unprotected (open access).
+
+### Forward proxy authentication
+
+Protect the forward proxy with HTTP Basic authentication:
+
+```bash
+python copilot_adapter.py serve --proxy --proxy-user myuser --proxy-password mypass
+```
+
+Clients must include credentials in the proxy URL:
+
+```bash
+export HTTPS_PROXY=http://myuser:mypass@127.0.0.1:18080
+```
+
+Proxy authentication only applies to forward proxy requests (CONNECT and absolute-URL requests). Direct API requests use Bearer token authentication instead.
 
 ## Client configuration
 

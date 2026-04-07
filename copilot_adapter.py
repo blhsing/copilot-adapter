@@ -194,6 +194,45 @@ def ca_cert(ca_dir: str | None):
 
 
 @main.command()
+@click.option("--generate", "do_generate", is_flag=True,
+              help="Generate a new API token.")
+@click.option("--label", default=None, metavar="LABEL",
+              help="Optional label for the generated token.")
+@click.option("--revoke", "revoke_value", default=None, metavar="TOKEN_OR_LABEL",
+              help="Revoke a token by its value or label.")
+def tokens(do_generate: bool, label: str | None, revoke_value: str | None):
+    """Manage API tokens for protecting the reverse API proxy."""
+    from lib.auth import (generate_api_token, list_api_tokens,
+                          revoke_api_token)
+
+    if do_generate:
+        entry = generate_api_token(label=label)
+        print(f"Generated API token (save this — it won't be shown again):")
+        print(f"  Token:   {entry['token']}")
+        if entry["label"]:
+            print(f"  Label:   {entry['label']}")
+        print(f"  Created: {entry['created_at']}")
+        return
+
+    if revoke_value:
+        if not revoke_api_token(revoke_value):
+            raise click.ClickException(
+                f"No token matching '{revoke_value}' found")
+        print(f"Revoked token: {revoke_value}")
+        return
+
+    all_tokens = list_api_tokens()
+    if not all_tokens:
+        print("No API tokens. Use --generate to create one.")
+        return
+    print(f"API tokens ({len(all_tokens)}):")
+    for t in all_tokens:
+        masked = t["token"][:6] + "..." + t["token"][-4:]
+        label_str = f" ({t['label']})" if t.get("label") else ""
+        print(f"  - {masked}{label_str}  created: {t['created_at']}")
+
+
+@main.command()
 @click.option("--config", "config_path", default=None, metavar="PATH",
               envvar="COPILOT_ADAPTER_CONFIG",
               help=f"Path to JSON config file (default: {_DEFAULT_CONFIG}).")
@@ -243,12 +282,25 @@ def ca_cert(ca_dir: str | None):
               help="Model mapping as pattern=target (repeatable, e.g. "
                    "'--model-map *sonnet*=claude-sonnet-4.6'). "
                    "Env var supports comma-separated values.")
+@click.option("--proxy-user", default=None, metavar="USER",
+              envvar="COPILOT_ADAPTER_PROXY_USER",
+              help="Username for forward proxy authentication.")
+@click.option("--proxy-password", default=None, metavar="PASS",
+              envvar="COPILOT_ADAPTER_PROXY_PASSWORD",
+              help="Password for forward proxy authentication.")
+@click.option("--api-token", "api_token_raw", multiple=True, metavar="TOKEN",
+              envvar="COPILOT_ADAPTER_API_TOKEN",
+              help="API token for protecting the reverse API proxy (repeatable). "
+                   "Env var supports comma-separated values. "
+                   "If not specified, loads from stored tokens.")
 def serve(config_path: str | None, host: str | None, port: int | None,
           github_token: tuple[str, ...], cors_origin: tuple[str, ...],
           workers: int | None, strategy: str | None,
           quota_limit: int | None, plan: str | None,
           log_level: str | None, force_free: bool, proxy_mode: bool,
-          ca_dir: str | None, model_map_raw: tuple[str, ...]):
+          ca_dir: str | None, model_map_raw: tuple[str, ...],
+          proxy_user: str | None, proxy_password: str | None,
+          api_token_raw: tuple[str, ...]):
     """Start the OpenAI-compatible API server."""
     import uvicorn
 
@@ -288,6 +340,27 @@ def serve(config_path: str | None, host: str | None, port: int | None,
     elif "model_map" in cfg:
         model_map_list = list(cfg["model_map"].items())
     # Otherwise None → init_app will load the shipped default
+
+    # --- Proxy auth: CLI/env > config file ---
+    proxy_user = proxy_user or cfg.get("proxy_user")
+    proxy_password = proxy_password or cfg.get("proxy_password")
+
+    # --- API tokens: CLI/env > config file > stored tokens ---
+    api_tokens: list[str] | None = None
+    if api_token_raw:
+        api_tokens = []
+        for raw in api_token_raw:
+            for t in raw.split(","):
+                t = t.strip()
+                if t:
+                    api_tokens.append(t)
+    elif "api_tokens" in cfg:
+        api_tokens = list(cfg["api_tokens"])
+    else:
+        from lib.auth import get_api_token_values
+        stored = get_api_token_values()
+        if stored:
+            api_tokens = stored
 
     # --- Resolve accounts ---
     # CLI/env tokens (may include :plan:quota:usage annotations)
@@ -369,6 +442,10 @@ def serve(config_path: str | None, host: str | None, port: int | None,
         print(f"  - {acct.username} (plan: {acct.plan}, usage: {acct.premium_used}/{limit_str})")
     if force_free:
         print("\n** Free mode enabled: all requests will be marked as agent-initiated **")
+    if api_tokens:
+        print(f"\n** API token protection enabled ({len(api_tokens)} token(s)) **")
+    if proxy_user and proxy_password:
+        print(f"\n** Forward proxy authentication enabled (user: {proxy_user}) **")
     print(f"\nStarting server on http://{host}:{port}")
     print(f"  POST /v1/chat/completions                       (OpenAI)")
     print(f"  POST /v1/responses                              (OpenAI)")
@@ -416,6 +493,8 @@ def serve(config_path: str | None, host: str | None, port: int | None,
             os.environ["_COPILOT_ADAPTER_MODEL_MAP"] = ",".join(
                 f"{p}={t}" for p, t in model_map_list
             )
+        if api_tokens:
+            os.environ["_COPILOT_ADAPTER_API_TOKENS"] = ",".join(api_tokens)
 
         # Custom log config to suppress repetitive per-worker lifespan messages
         from uvicorn.config import LOGGING_CONFIG
@@ -434,12 +513,15 @@ def serve(config_path: str | None, host: str | None, port: int | None,
         )
     else:
         application = init_app(acct_mgr, cors_origins=list(cors_origin) or None,
-                               force_free=force_free, model_map=model_map_list)
+                               force_free=force_free, model_map=model_map_list,
+                               api_tokens=api_tokens)
         if proxy_mode:
             from lib.forward_proxy import DualModeServer
             dual = DualModeServer(
                 application, host=host, port=port,
                 ca_dir=ca_dir,
+                proxy_user=proxy_user,
+                proxy_password=proxy_password,
                 uvicorn_log_level=log_level,
                 uvicorn_use_colors=_supports_color(),
                 timeout_graceful_shutdown=5,

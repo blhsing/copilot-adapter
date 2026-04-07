@@ -366,3 +366,64 @@ class CopilotTokenManager:
             self._copilot_token = data["token"]
             self._expires_at = data["expires_at"]
             return self._copilot_token
+
+
+# ---------------------------------------------------------------------------
+# API token management (for protecting the reverse API proxy)
+# ---------------------------------------------------------------------------
+
+API_TOKENS_FILE = Path.home() / ".config" / "copilot-api" / "api_tokens.json"
+
+
+def _load_api_tokens() -> list[dict]:
+    """Load API tokens from the tokens file."""
+    if not API_TOKENS_FILE.exists():
+        return []
+    data = json.loads(API_TOKENS_FILE.read_text())
+    return data.get("tokens", [])
+
+
+def _save_api_tokens(tokens: list[dict]) -> None:
+    """Write API tokens to the tokens file."""
+    API_TOKENS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    API_TOKENS_FILE.write_text(json.dumps({"tokens": tokens}, indent=2) + "\n")
+
+
+def generate_api_token(label: str | None = None) -> dict:
+    """Generate a new API token, persist it, and return the entry."""
+    import secrets
+    from datetime import datetime, timezone
+
+    token = "sk-" + secrets.token_hex(32)
+    entry = {
+        "token": token,
+        "label": label or "",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    tokens = _load_api_tokens()
+    tokens.append(entry)
+    _save_api_tokens(tokens)
+    return entry
+
+
+def list_api_tokens() -> list[dict]:
+    """Return all API tokens with masked values for display."""
+    return _load_api_tokens()
+
+
+def revoke_api_token(token_or_label: str) -> bool:
+    """Remove an API token by exact token value or label. Returns True if found."""
+    tokens = _load_api_tokens()
+    remaining = [
+        t for t in tokens
+        if t["token"] != token_or_label and t.get("label") != token_or_label
+    ]
+    if len(remaining) == len(tokens):
+        return False
+    _save_api_tokens(remaining)
+    return True
+
+
+def get_api_token_values() -> list[str]:
+    """Return the raw token strings for auth checking."""
+    return [t["token"] for t in _load_api_tokens()]
