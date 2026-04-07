@@ -11,7 +11,7 @@ Authenticates via a GitHub Personal Access Token (PAT) or GitHub's device flow, 
 - **Smart premium request billing** — Automatically avoids extra premium request charges for agentic follow-ups, with no client-side changes needed
 - **Rate limit handling** — Automatically retries on rate limit errors by rotating to the next available account
 - **Three API formats** — Serves OpenAI, Anthropic, and Gemini endpoints simultaneously
-- **Forward proxy mode** — Acts as an HTTP/HTTPS proxy that intercepts Copilot API traffic and rewrites billing headers, so any client that supports `HTTPS_PROXY` can benefit without reconfiguration
+- **Forward proxy mode** — Acts as an HTTP/HTTPS proxy that intercepts Copilot API traffic and rewrites billing headers, and transparently reroutes requests for OpenAI, Anthropic, and Gemini APIs through Copilot
 - **Configurable model mapping** — Glob-pattern-based model name rewriting, with sensible defaults for Claude models
 - **Streaming support** — Full SSE streaming across all three formats, including real-time format translation
 - **Flexible authentication** — Supports multiple GitHub PATs, environment variables, cached tokens, and interactive device-flow OAuth, with automatic fallback
@@ -289,7 +289,7 @@ This is useful when you want to avoid all premium billing regardless of request 
 
 When using multi-account rotation, agent-initiated requests always stay on the same account as the preceding user request to avoid billing a premium request on a different account.
 
-### Forward proxy mode
+## Forward proxy mode
 
 Use `--proxy` to enable a forward HTTP/HTTPS proxy on the same port as the API server. In this mode, the server handles both normal API requests (reverse proxy) and forwarded client traffic (forward proxy) on a single port:
 
@@ -324,7 +324,7 @@ The client must trust this CA for HTTPS interception to work. For Node.js-based 
 
 This mode is useful when you want to transparently reduce premium billing for any client that supports `HTTPS_PROXY`, without changing the client's API endpoint configuration.
 
-### Model mapping
+## Model mapping
 
 Model names in incoming requests are rewritten using configurable glob patterns before being sent to the Copilot API. This is necessary because Copilot uses dotted version numbers for Claude models (e.g. `claude-sonnet-4.6`) while clients like Claude Code send hyphenated names (e.g. `claude-sonnet-4-6`, `claude-3-5-sonnet-latest`). Without mapping, these requests fail with `model_not_supported`.
 
