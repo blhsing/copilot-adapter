@@ -4,6 +4,8 @@ import json
 import logging
 import os
 from contextlib import asynccontextmanager
+from fnmatch import fnmatch
+from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -15,8 +17,19 @@ logger = logging.getLogger(__name__)
 
 account_mgr: AccountManager | None = None
 _force_free: bool = False
+_model_map: list[tuple[str, str]] = []
 openai_adapter = OpenAIAdapter()
 anthropic_adapter = AnthropicAdapter()
+
+_DEFAULT_MODEL_MAP_FILE = Path(__file__).resolve().parent.parent / "model_map.json"
+
+
+def load_default_model_map() -> list[tuple[str, str]]:
+    """Load the default model map from the shipped model_map.json file."""
+    if _DEFAULT_MODEL_MAP_FILE.exists():
+        data = json.loads(_DEFAULT_MODEL_MAP_FILE.read_text())
+        return list(data.items())
+    return []
 
 _STREAM_HEADERS = {
     "Cache-Control": "no-cache",
@@ -51,11 +64,22 @@ def _extract_model_from_sse_line(line: str) -> str | None:
         return None
 
 
+def _apply_model_map(model: str) -> str:
+    """Apply the configured model mapping to a model name."""
+    for pattern, target in _model_map:
+        if fnmatch(model, pattern):
+            if model != target:
+                logger.debug("Model map: %s -> %s (pattern: %s)", model, target, pattern)
+            return target
+    return model
+
+
 @asynccontextmanager
 async def _lifespan(application: FastAPI):
     """Initialize the AccountManager in each worker process on startup."""
     global account_mgr
     global _force_free
+    global _model_map
     tokens_raw = os.environ.get("_COPILOT_ADAPTER_GITHUB_TOKENS", "")
     if tokens_raw and account_mgr is None:
         _force_free = os.environ.get("_COPILOT_ADAPTER_FREE", "") == "1"
@@ -80,6 +104,16 @@ async def _lifespan(application: FastAPI):
             accounts, strategy=strategy, quota_limit=quota_limit, plan=plan,
         )
 
+        model_map_raw = os.environ.get("_COPILOT_ADAPTER_MODEL_MAP", "")
+        if model_map_raw:
+            _model_map = []
+            for entry in model_map_raw.split(","):
+                if "=" in entry:
+                    pat, _, tgt = entry.partition("=")
+                    _model_map.append((pat, tgt))
+        else:
+            _model_map = load_default_model_map()
+
         cors_raw = os.environ.get("_COPILOT_ADAPTER_CORS_ORIGINS", "")
         if cors_raw:
             from fastapi.middleware.cors import CORSMiddleware
@@ -99,10 +133,12 @@ app = FastAPI(title="Copilot API", version="0.1.0", lifespan=_lifespan)
 def init_app(
     mgr: AccountManager, cors_origins: list[str] | None = None,
     force_free: bool = False,
+    model_map: list[tuple[str, str]] | None = None,
 ) -> FastAPI:
-    global account_mgr, _force_free
+    global account_mgr, _force_free, _model_map
     account_mgr = mgr
     _force_free = force_free
+    _model_map = model_map if model_map is not None else load_default_model_map()
 
     if cors_origins:
         from fastapi.middleware.cors import CORSMiddleware
@@ -149,6 +185,7 @@ async def handle_chat_completion(
 ):
     resolved = initiator or adapter.infer_initiator(body)
     openai_body = adapter.convert_chat_request(body)
+    openai_body["model"] = _apply_model_map(openai_body.get("model", ""))
     requested_model = openai_body.get("model", "")
 
     client = await account_mgr.get_client(initiator=resolved)
@@ -293,6 +330,7 @@ async def chat_completions(request: Request):
 async def responses(request: Request):
     body = await request.json()
     initiator = _get_initiator(request) or "user"
+    body["model"] = _apply_model_map(body.get("model", ""))
     requested_model = body.get("model", "")
 
     client = await account_mgr.get_client(initiator=initiator)
@@ -393,6 +431,7 @@ async def responses(request: Request):
 async def embeddings(request: Request):
     body = await request.json()
     initiator = _get_initiator(request) or "user"
+    body["model"] = _apply_model_map(body.get("model", ""))
     client = await account_mgr.get_client(initiator=initiator)
     account = account_mgr.get_username(client)
     model = body.get("model", "")
@@ -509,6 +548,7 @@ async def gemini_stream_generate_content(model_id: str, request: Request):
     adapter = GeminiAdapter(model_id)
     resolved = _get_initiator(request) or adapter.infer_initiator(body)
     openai_body = adapter.convert_chat_request(body)
+    openai_body["model"] = _apply_model_map(openai_body.get("model", ""))
     openai_body["stream"] = True
     requested_model = openai_body.get("model", "")
     client = await account_mgr.get_client(initiator=resolved)

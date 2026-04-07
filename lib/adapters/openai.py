@@ -23,12 +23,6 @@ class OpenAIAdapter(FormatAdapter):
     """Passthrough adapter — the Copilot API already speaks OpenAI format."""
 
     def convert_chat_request(self, body: dict) -> dict:
-        model = body.get("model", "")
-        # Map common OpenAI requested names to Copilot's specific API IDs
-        if model == "gpt-4-turbo":
-            body["model"] = "gpt-4-0125-preview"
-        elif model == "gpt-4-1106-preview":
-            body["model"] = "gpt-4-0125-preview"
         return body
 
     def convert_chat_response(self, openai_resp: dict, original_body: dict) -> dict:

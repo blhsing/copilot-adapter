@@ -1,0 +1,486 @@
+"""Dual-mode server: forward HTTP/HTTPS proxy + reverse API proxy on one port.
+
+When ``--proxy`` is enabled the TCP listener inspects each connection's first
+request line:
+
+* ``CONNECT host:port`` → forward-proxy path (MITM for Copilot, blind relay
+  for everything else).
+* Absolute URL (``GET http://…``) → plain HTTP forward proxy.
+* Relative path (``POST /v1/chat/completions``) → handed to the FastAPI /
+  Uvicorn ASGI app (the normal reverse-proxy behaviour).
+"""
+
+import asyncio
+import logging
+import ssl
+import socket
+from pathlib import Path
+from urllib.parse import urlparse
+
+import uvicorn
+
+from .cert import ca_paths, ensure_ca, build_server_ssl_context
+
+logger = logging.getLogger(__name__)
+
+COPILOT_HOST = "api.githubcopilot.com"
+_BUF = 65536
+
+
+# ---------------------------------------------------------------------------
+# Low-level helpers
+# ---------------------------------------------------------------------------
+
+async def _read_request_line(reader: asyncio.StreamReader) -> bytes | None:
+    """Read the first HTTP request line (e.g. ``CONNECT host:443 HTTP/1.1``)."""
+    try:
+        line = await asyncio.wait_for(reader.readline(), timeout=30)
+    except (asyncio.TimeoutError, ConnectionError):
+        return None
+    return line if line else None
+
+
+async def _read_headers(reader: asyncio.StreamReader) -> list[tuple[bytes, bytes]]:
+    """Read HTTP headers until the blank line.  Return list of (name, value)."""
+    headers: list[tuple[bytes, bytes]] = []
+    while True:
+        line = await reader.readline()
+        if line in (b"\r\n", b"\n", b""):
+            break
+        if b":" in line:
+            name, _, value = line.partition(b":")
+            headers.append((name.strip(), value.strip()))
+    return headers
+
+
+async def _read_body(reader: asyncio.StreamReader,
+                     headers: list[tuple[bytes, bytes]]) -> bytes:
+    """Read the request body based on Content-Length."""
+    for name, value in headers:
+        if name.lower() == b"content-length":
+            length = int(value)
+            return await reader.readexactly(length)
+    return b""
+
+
+def _serialize_request(request_line: bytes,
+                       headers: list[tuple[bytes, bytes]],
+                       body: bytes) -> bytes:
+    """Reassemble an HTTP request from parsed components."""
+    parts = [request_line.rstrip(b"\r\n")]
+    for name, value in headers:
+        parts.append(name + b": " + value)
+    parts.append(b"")
+    parts.append(b"")
+    result = b"\r\n".join(parts)
+    return result + body
+
+
+def _rewrite_initiator(headers: list[tuple[bytes, bytes]]) -> list[tuple[bytes, bytes]]:
+    """Rewrite X-Initiator: user → agent."""
+    out = []
+    for name, value in headers:
+        if name.lower() == b"x-initiator" and value.lower() == b"user":
+            logger.debug("Rewriting X-Initiator: user -> agent")
+            out.append((name, b"agent"))
+        else:
+            out.append((name, value))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Blind relay (non-Copilot CONNECT targets)
+# ---------------------------------------------------------------------------
+
+async def _relay(src: asyncio.StreamReader, dst: asyncio.StreamWriter):
+    try:
+        while True:
+            data = await src.read(_BUF)
+            if not data:
+                break
+            dst.write(data)
+            await dst.drain()
+    except (ConnectionError, OSError):
+        pass
+    finally:
+        try:
+            dst.close()
+        except Exception:
+            pass
+
+
+async def _blind_relay(r1: asyncio.StreamReader, w1: asyncio.StreamWriter,
+                       r2: asyncio.StreamReader, w2: asyncio.StreamWriter):
+    await asyncio.gather(_relay(r1, w2), _relay(r2, w1),
+                         return_exceptions=True)
+
+
+# ---------------------------------------------------------------------------
+# MITM path for Copilot
+# ---------------------------------------------------------------------------
+
+async def _tls_upgrade_server(writer: asyncio.StreamWriter,
+                              ssl_ctx: ssl.SSLContext,
+                              ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter] | None:
+    """Upgrade an existing connection to TLS (server-side).
+
+    Extracts the raw socket, wraps it with SSL in an executor thread,
+    then creates new async reader/writer on the wrapped socket.
+    """
+    transport = writer.transport
+    raw_sock: socket.socket = transport.get_extra_info("socket")
+    if raw_sock is None:
+        return None
+
+    # Detach the socket from asyncio's transport so we can wrap it
+    transport.pause_reading()
+    raw_sock = raw_sock.dup()
+    writer.close()
+    await writer.wait_closed()
+
+    loop = asyncio.get_event_loop()
+    try:
+        ssl_sock = await loop.run_in_executor(
+            None, lambda: ssl_ctx.wrap_socket(raw_sock, server_side=True)
+        )
+    except ssl.SSLError as exc:
+        logger.debug("TLS handshake failed: %s", exc)
+        raw_sock.close()
+        return None
+
+    ssl_sock.setblocking(False)
+    reader = asyncio.StreamReader()
+    protocol = asyncio.StreamReaderProtocol(reader)
+    transport_new, _ = await loop.create_connection(lambda: protocol, sock=ssl_sock)
+    new_writer = asyncio.StreamWriter(transport_new, protocol, reader, loop)
+    return reader, new_writer
+
+
+async def _handle_copilot_mitm(client_reader: asyncio.StreamReader,
+                               client_writer: asyncio.StreamWriter):
+    """Parse HTTP requests from the decrypted client stream, rewrite
+    X-Initiator, and relay to the real Copilot API."""
+
+    # Open a real TLS connection to the Copilot API
+    upstream_ssl = ssl.create_default_context()
+    try:
+        up_reader, up_writer = await asyncio.open_connection(
+            COPILOT_HOST, 443, ssl=upstream_ssl,
+        )
+    except Exception as exc:
+        logger.error("Failed to connect to %s: %s", COPILOT_HOST, exc)
+        client_writer.close()
+        return
+
+    try:
+        while True:
+            # Read one HTTP request from the client
+            request_line = await _read_request_line(client_reader)
+            if not request_line:
+                break
+
+            headers = await _read_headers(client_reader)
+            body = await _read_body(client_reader, headers)
+
+            # Rewrite the initiator header
+            headers = _rewrite_initiator(headers)
+
+            # Forward to upstream
+            raw = _serialize_request(request_line, headers, body)
+            up_writer.write(raw)
+            await up_writer.drain()
+
+            # Relay the response — read the response header block, then body
+            resp_line = await _read_request_line(up_reader)
+            if not resp_line:
+                break
+            resp_headers = await _read_headers(up_reader)
+
+            # Determine response body framing
+            client_writer.write(resp_line)
+            for name, value in resp_headers:
+                client_writer.write(name + b": " + value + b"\r\n")
+            client_writer.write(b"\r\n")
+            await client_writer.drain()
+
+            # Check for chunked transfer encoding
+            is_chunked = any(
+                name.lower() == b"transfer-encoding" and b"chunked" in value.lower()
+                for name, value in resp_headers
+            )
+            content_length = None
+            for name, value in resp_headers:
+                if name.lower() == b"content-length":
+                    content_length = int(value)
+                    break
+
+            if is_chunked:
+                # Relay chunked response
+                while True:
+                    chunk_header = await up_reader.readline()
+                    if not chunk_header:
+                        break
+                    client_writer.write(chunk_header)
+                    await client_writer.drain()
+
+                    # Parse chunk size
+                    try:
+                        chunk_size = int(chunk_header.strip(), 16)
+                    except ValueError:
+                        continue
+                    if chunk_size == 0:
+                        # Read trailing \r\n
+                        trailer = await up_reader.readline()
+                        client_writer.write(trailer)
+                        await client_writer.drain()
+                        break
+                    # Read chunk data + trailing \r\n
+                    chunk_data = await up_reader.readexactly(chunk_size + 2)
+                    client_writer.write(chunk_data)
+                    await client_writer.drain()
+            elif content_length is not None:
+                # Fixed-length body
+                remaining = content_length
+                while remaining > 0:
+                    data = await up_reader.read(min(remaining, _BUF))
+                    if not data:
+                        break
+                    client_writer.write(data)
+                    await client_writer.drain()
+                    remaining -= len(data)
+            else:
+                # No content-length and not chunked — read until connection
+                # closes (uncommon for keep-alive, but handle it)
+                # For keep-alive we assume the response is empty if neither
+                # content-length nor chunked is specified
+                pass
+
+            # Check connection keep-alive
+            connection = b"keep-alive"
+            for name, value in resp_headers:
+                if name.lower() == b"connection":
+                    connection = value.lower()
+                    break
+            if connection == b"close":
+                break
+
+    except (ConnectionError, OSError, asyncio.IncompleteReadError):
+        pass
+    finally:
+        for w in (client_writer, up_writer):
+            try:
+                w.close()
+            except Exception:
+                pass
+
+
+# ---------------------------------------------------------------------------
+# Connection handler (dispatches CONNECT / plain-HTTP / ASGI)
+# ---------------------------------------------------------------------------
+
+async def _handle_connect(host: str, port: int,
+                          reader: asyncio.StreamReader,
+                          writer: asyncio.StreamWriter,
+                          ca_cert, ca_key):
+    """Handle a CONNECT tunnel request."""
+    # Consume remaining headers
+    await _read_headers(reader)
+
+    # Respond 200
+    writer.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
+    await writer.drain()
+
+    if host == COPILOT_HOST:
+        logger.info("MITM intercepting CONNECT to %s:%d", host, port)
+        ssl_ctx = build_server_ssl_context(host, ca_cert, ca_key)
+        result = await _tls_upgrade_server(writer, ssl_ctx)
+        if result is None:
+            return
+        tls_reader, tls_writer = result
+        await _handle_copilot_mitm(tls_reader, tls_writer)
+    else:
+        logger.debug("Blind relay CONNECT to %s:%d", host, port)
+        try:
+            up_reader, up_writer = await asyncio.open_connection(host, port)
+        except Exception as exc:
+            logger.error("Failed to connect to %s:%d: %s", host, port, exc)
+            writer.close()
+            return
+        await _blind_relay(reader, writer, up_reader, up_writer)
+
+
+async def _handle_plain_http(method: bytes, url: bytes, version: bytes,
+                             reader: asyncio.StreamReader,
+                             writer: asyncio.StreamWriter):
+    """Handle a plain HTTP request with an absolute URL (forward proxy)."""
+    parsed = urlparse(url)
+    host = parsed.hostname or b""
+    port = parsed.port or 80
+    path = parsed.path or b"/"
+    if parsed.query:
+        path = path + b"?" + parsed.query
+
+    if isinstance(host, bytes):
+        host_str = host.decode("ascii", errors="replace")
+    else:
+        host_str = host
+
+    headers = await _read_headers(reader)
+    body = await _read_body(reader, headers)
+
+    # Rewrite request line to use relative path
+    request_line = method + b" " + path + b" " + version + b"\r\n"
+
+    # Rewrite initiator if targeting Copilot
+    if host_str == COPILOT_HOST:
+        headers = _rewrite_initiator(headers)
+
+    raw = _serialize_request(request_line, headers, body)
+
+    try:
+        up_reader, up_writer = await asyncio.open_connection(host_str, port)
+    except Exception as exc:
+        logger.error("Failed to connect to %s:%d: %s", host_str, port, exc)
+        writer.write(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
+        writer.close()
+        return
+
+    up_writer.write(raw)
+    await up_writer.drain()
+
+    # Relay the entire response back
+    await _relay(up_reader, writer)
+    up_writer.close()
+
+
+# ---------------------------------------------------------------------------
+# Dual-mode server
+# ---------------------------------------------------------------------------
+
+class DualModeServer:
+    """TCP server that dispatches connections to forward-proxy or ASGI."""
+
+    def __init__(self, asgi_app, *, host: str, port: int,
+                 ca_dir: Path | None = None,
+                 uvicorn_log_level: str = "info",
+                 uvicorn_use_colors: bool = True,
+                 timeout_graceful_shutdown: int = 5):
+        self._asgi_app = asgi_app
+        self._host = host
+        self._port = port
+        self._ca_dir = ca_dir
+        self._uvicorn_log_level = uvicorn_log_level
+        self._uvicorn_use_colors = uvicorn_use_colors
+        self._timeout = timeout_graceful_shutdown
+
+        # CA for MITM
+        self._ca_cert, self._ca_key = ensure_ca(ca_dir)
+
+        # Internal Uvicorn server on localhost ephemeral port
+        self._internal_host = "127.0.0.1"
+        self._internal_port: int | None = None
+        self._uvicorn_server: uvicorn.Server | None = None
+
+    async def _start_uvicorn(self):
+        """Start Uvicorn on an ephemeral port and record the actual port."""
+        # Find a free port
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind((self._internal_host, 0))
+            self._internal_port = s.getsockname()[1]
+
+        config = uvicorn.Config(
+            self._asgi_app,
+            host=self._internal_host,
+            port=self._internal_port,
+            log_level=self._uvicorn_log_level,
+            timeout_graceful_shutdown=self._timeout,
+            use_colors=self._uvicorn_use_colors,
+        )
+        self._uvicorn_server = uvicorn.Server(config)
+        asyncio.create_task(self._uvicorn_server.serve())
+        # Wait for Uvicorn to be ready
+        while not self._uvicorn_server.started:
+            await asyncio.sleep(0.05)
+
+    async def _forward_to_uvicorn(self, first_line: bytes,
+                                  reader: asyncio.StreamReader,
+                                  writer: asyncio.StreamWriter):
+        """Forward a normal API request to the internal Uvicorn server."""
+        try:
+            up_reader, up_writer = await asyncio.open_connection(
+                self._internal_host, self._internal_port,
+            )
+        except Exception as exc:
+            logger.error("Failed to connect to internal Uvicorn: %s", exc)
+            writer.write(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
+            writer.close()
+            return
+
+        # Send the first line we already consumed
+        up_writer.write(first_line)
+        await up_writer.drain()
+
+        # Bidirectional relay for the rest
+        await _blind_relay(reader, writer, up_reader, up_writer)
+
+    async def _handle_client(self, reader: asyncio.StreamReader,
+                             writer: asyncio.StreamWriter):
+        """Dispatch a new connection based on the first request line."""
+        first_line = await _read_request_line(reader)
+        if not first_line:
+            writer.close()
+            return
+
+        parts = first_line.split()
+        if len(parts) < 2:
+            writer.close()
+            return
+
+        method = parts[0].upper()
+
+        if method == b"CONNECT":
+            # CONNECT host:port HTTP/1.1
+            target = parts[1].decode("ascii", errors="replace")
+            if ":" in target:
+                host, port_str = target.rsplit(":", 1)
+                port = int(port_str)
+            else:
+                host = target
+                port = 443
+            await _handle_connect(host, port, reader, writer,
+                                  self._ca_cert, self._ca_key)
+
+        elif parts[1].startswith(b"http://") or parts[1].startswith(b"https://"):
+            # Absolute URL → plain HTTP forward proxy
+            await _handle_plain_http(method, parts[1],
+                                     parts[2] if len(parts) > 2 else b"HTTP/1.1",
+                                     reader, writer)
+        else:
+            # Relative path → normal API proxy, forward to Uvicorn
+            await self._forward_to_uvicorn(first_line, reader, writer)
+
+    async def serve(self):
+        """Start both the TCP front-end and the internal Uvicorn server."""
+        await self._start_uvicorn()
+
+        server = await asyncio.start_server(
+            self._handle_client, self._host, self._port,
+        )
+
+        cert_path, _ = ca_paths(self._ca_dir)
+        logger.info("Forward proxy active on %s:%d", self._host, self._port)
+        print(f"\nForward proxy active (same port)")
+        print(f"  Rewrites X-Initiator: user -> agent for {COPILOT_HOST}")
+        print(f"  CA certificate: {cert_path}")
+        print(f"  Configure client: HTTPS_PROXY=http://{self._host}:{self._port}")
+        print(f"  Trust CA (Node.js): NODE_EXTRA_CA_CERTS={cert_path}\n")
+
+        try:
+            await server.serve_forever()
+        except asyncio.CancelledError:
+            pass
+        finally:
+            server.close()
+            await server.wait_closed()
+            if self._uvicorn_server:
+                self._uvicorn_server.should_exit = True
