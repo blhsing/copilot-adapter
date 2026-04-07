@@ -297,7 +297,12 @@ Use `--proxy` to enable a forward HTTP/HTTPS proxy on the same port as the API s
 python copilot_adapter.py serve --proxy
 ```
 
-When a client sends a `CONNECT` request to `api.githubcopilot.com`, the proxy performs a MITM (man-in-the-middle) TLS interception and rewrites `X-Initiator: user` to `X-Initiator: agent` so the request is not billed as a premium request. All other traffic is tunneled transparently.
+The proxy intercepts HTTPS connections to the following hosts:
+
+- **`api.githubcopilot.com`** — rewrites `X-Initiator: user` to `agent` so requests are not billed as premium
+- **`api.openai.com`**, **`api.anthropic.com`**, **`generativelanguage.googleapis.com`** — redirects requests to the local adapter, so clients configured to use these APIs are transparently routed through Copilot
+
+All other traffic is tunneled transparently.
 
 **Client setup:**
 
@@ -418,7 +423,7 @@ Tests use the cheapest available models (`gpt-4o-mini` for chat, `gpt-5-mini` fo
 2. GitHub tokens are exchanged for short-lived Copilot API tokens via `api.github.com/copilot_internal/v2/token`, automatically refreshed every ~25 minutes with concurrent-access protection (double-checked locking ensures only one refresh happens at a time)
 3. For multi-account setups, the `AccountManager` selects which account to use based on the configured rotation strategy, sticking to the same account for agent-initiated follow-ups
 4. Incoming requests are translated (if needed) to the format Copilot expects, model names are rewritten via the configurable model map, and requests are proxied to `api.githubcopilot.com` with responses translated back to the client's expected format
-5. In forward proxy mode (`--proxy`), the server also accepts `CONNECT` tunnels on the same port — traffic to `api.githubcopilot.com` is MITM'd to rewrite billing headers, while all other traffic is tunneled transparently
+5. In forward proxy mode (`--proxy`), the server also accepts `CONNECT` tunnels on the same port — traffic to `api.githubcopilot.com` is MITM'd to rewrite billing headers, traffic to OpenAI/Anthropic/Gemini APIs is redirected to the local adapter, and all other traffic is tunneled transparently
 
 ## Known issues
 

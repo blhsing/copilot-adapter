@@ -24,6 +24,12 @@ from .cert import ca_paths, ensure_ca, build_server_ssl_context
 logger = logging.getLogger(__name__)
 
 COPILOT_HOST = "api.githubcopilot.com"
+_INTERCEPT_HOSTS = {
+    COPILOT_HOST,
+    "api.openai.com",
+    "api.anthropic.com",
+    "generativelanguage.googleapis.com",
+}
 _BUF = 65536
 
 
@@ -275,13 +281,131 @@ async def _handle_copilot_mitm(client_reader: asyncio.StreamReader,
 
 
 # ---------------------------------------------------------------------------
+# MITM path for OpenAI / Anthropic / Gemini → internal Uvicorn
+# ---------------------------------------------------------------------------
+
+async def _handle_rewrite_mitm(client_reader: asyncio.StreamReader,
+                               client_writer: asyncio.StreamWriter,
+                               internal_host: str,
+                               internal_port: int):
+    """Parse HTTP requests from a MITM'd API connection and forward them
+    to the internal Uvicorn server, which translates and proxies to Copilot."""
+    try:
+        while True:
+            request_line = await _read_request_line(client_reader)
+            if not request_line:
+                break
+
+            headers = await _read_headers(client_reader)
+            body = await _read_body(client_reader, headers)
+
+            # Strip Host header (Uvicorn doesn't care) and replace it
+            headers = [
+                (n, v) for n, v in headers
+                if n.lower() != b"host"
+            ]
+            host_val = f"{internal_host}:{internal_port}".encode()
+            headers.append((b"Host", host_val))
+
+            raw = _serialize_request(request_line, headers, body)
+
+            try:
+                up_reader, up_writer = await asyncio.open_connection(
+                    internal_host, internal_port,
+                )
+            except Exception as exc:
+                logger.error("Failed to connect to internal Uvicorn: %s", exc)
+                client_writer.write(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
+                await client_writer.drain()
+                break
+
+            up_writer.write(raw)
+            await up_writer.drain()
+
+            # Relay response back to client
+            resp_line = await _read_request_line(up_reader)
+            if not resp_line:
+                up_writer.close()
+                break
+
+            resp_headers = await _read_headers(up_reader)
+
+            client_writer.write(resp_line)
+            for name, value in resp_headers:
+                client_writer.write(name + b": " + value + b"\r\n")
+            client_writer.write(b"\r\n")
+            await client_writer.drain()
+
+            # Determine response body framing
+            is_chunked = any(
+                name.lower() == b"transfer-encoding" and b"chunked" in value.lower()
+                for name, value in resp_headers
+            )
+            content_length = None
+            for name, value in resp_headers:
+                if name.lower() == b"content-length":
+                    content_length = int(value)
+                    break
+
+            if is_chunked:
+                while True:
+                    chunk_header = await up_reader.readline()
+                    if not chunk_header:
+                        break
+                    client_writer.write(chunk_header)
+                    await client_writer.drain()
+                    try:
+                        chunk_size = int(chunk_header.strip(), 16)
+                    except ValueError:
+                        continue
+                    if chunk_size == 0:
+                        trailer = await up_reader.readline()
+                        client_writer.write(trailer)
+                        await client_writer.drain()
+                        break
+                    chunk_data = await up_reader.readexactly(chunk_size + 2)
+                    client_writer.write(chunk_data)
+                    await client_writer.drain()
+            elif content_length is not None:
+                remaining = content_length
+                while remaining > 0:
+                    data = await up_reader.read(min(remaining, _BUF))
+                    if not data:
+                        break
+                    client_writer.write(data)
+                    await client_writer.drain()
+                    remaining -= len(data)
+
+            up_writer.close()
+
+            # Check connection keep-alive
+            connection = b"keep-alive"
+            for name, value in resp_headers:
+                if name.lower() == b"connection":
+                    connection = value.lower()
+                    break
+            if connection == b"close":
+                break
+
+    except (ConnectionError, OSError, asyncio.IncompleteReadError):
+        pass
+    finally:
+        try:
+            client_writer.close()
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------------------
 # Connection handler (dispatches CONNECT / plain-HTTP / ASGI)
 # ---------------------------------------------------------------------------
 
 async def _handle_connect(host: str, port: int,
                           reader: asyncio.StreamReader,
                           writer: asyncio.StreamWriter,
-                          ca_cert, ca_key):
+                          ca_cert, ca_key,
+                          internal_host: str = "127.0.0.1",
+                          internal_port: int = 0):
     """Handle a CONNECT tunnel request."""
     # Consume remaining headers
     await _read_headers(reader)
@@ -290,14 +414,18 @@ async def _handle_connect(host: str, port: int,
     writer.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
     await writer.drain()
 
-    if host == COPILOT_HOST:
+    if host in _INTERCEPT_HOSTS:
         logger.info("MITM intercepting CONNECT to %s:%d", host, port)
         ssl_ctx = build_server_ssl_context(host, ca_cert, ca_key)
         result = await _tls_upgrade_server(writer, ssl_ctx)
         if result is None:
             return
         tls_reader, tls_writer = result
-        await _handle_copilot_mitm(tls_reader, tls_writer)
+        if host == COPILOT_HOST:
+            await _handle_copilot_mitm(tls_reader, tls_writer)
+        else:
+            await _handle_rewrite_mitm(tls_reader, tls_writer,
+                                       internal_host, internal_port)
     else:
         logger.debug("Blind relay CONNECT to %s:%d", host, port)
         try:
@@ -448,7 +576,8 @@ class DualModeServer:
                 host = target
                 port = 443
             await _handle_connect(host, port, reader, writer,
-                                  self._ca_cert, self._ca_key)
+                                  self._ca_cert, self._ca_key,
+                                  self._internal_host, self._internal_port)
 
         elif parts[1].startswith(b"http://") or parts[1].startswith(b"https://"):
             # Absolute URL → plain HTTP forward proxy
@@ -470,7 +599,7 @@ class DualModeServer:
         cert_path, _ = ca_paths(self._ca_dir)
         logger.info("Forward proxy active on %s:%d", self._host, self._port)
         print(f"\nForward proxy active (same port)")
-        print(f"  Rewrites X-Initiator: user -> agent for {COPILOT_HOST}")
+        print(f"  Intercepts: {', '.join(sorted(_INTERCEPT_HOSTS))}")
         print(f"  CA certificate: {cert_path}")
         print(f"  Configure client: HTTPS_PROXY=http://{self._host}:{self._port}")
         print(f"  Trust CA (Node.js): NODE_EXTRA_CA_CERTS={cert_path}\n")
