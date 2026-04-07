@@ -306,7 +306,16 @@ export HTTPS_PROXY=http://127.0.0.1:18080
 export NODE_EXTRA_CA_CERTS=~/.config/copilot-api/ca.pem
 ```
 
-A self-signed CA certificate is generated automatically on first use and stored in `~/.config/copilot-api/` (or the directory specified by `--ca-dir`). The client must trust this CA for HTTPS interception to work. For Node.js-based clients (e.g. Claude Code), set `NODE_EXTRA_CA_CERTS` to the CA certificate path.
+A self-signed CA certificate is generated automatically on first use and stored in `~/.config/copilot-api/` (or the directory specified by `--ca-dir`). Use `ca-cert` to generate the CA ahead of time or show its path:
+
+```bash
+python copilot_adapter.py ca-cert
+# CA certificate: ~/.config/copilot-api/ca.pem
+#   Subject:  CN=copilot-adapter MITM CA
+#   Valid:    2026-04-07 to 2036-04-05
+```
+
+The client must trust this CA for HTTPS interception to work. For Node.js-based clients (e.g. Claude Code), set `NODE_EXTRA_CA_CERTS` to the CA certificate path.
 
 This mode is useful when you want to transparently reduce premium billing for any client that supports `HTTPS_PROXY`, without changing the client's API endpoint configuration.
 
