@@ -85,17 +85,6 @@ def _anthropic_to_openai(body: dict) -> dict:
     messages = []
 
     model = body.get("model", "")
-    # Map raw Anthropic model names (e.g. from Claude Code) to Copilot's expected names
-    if "sonnet-4-6" in model or "sonnet-20250219" in model:
-        model = "claude-sonnet-4.6"
-    elif "opus-4-6" in model:
-        model = "claude-opus-4.6"
-    elif "haiku-4-5" in model:
-        model = "claude-haiku-4.5"
-    elif "sonnet-3-5" in model or "sonnet-20241022" in model or "sonnet-20240620" in model:
-        model = "claude-3.5-sonnet"
-    elif "haiku-3-5" in model or "haiku-20241022" in model:
-        model = "claude-3.5-haiku"
 
     system = body.get("system")
     if system:

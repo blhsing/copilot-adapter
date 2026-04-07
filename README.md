@@ -11,6 +11,8 @@ Authenticates via a GitHub Personal Access Token (PAT) or GitHub's device flow, 
 - **Smart premium request billing** — Automatically avoids extra premium request charges for agentic follow-ups, with no client-side changes needed
 - **Rate limit handling** — Automatically retries on rate limit errors by rotating to the next available account
 - **Three API formats** — Serves OpenAI, Anthropic, and Gemini endpoints simultaneously
+- **Forward proxy mode** — Acts as an HTTP/HTTPS proxy that intercepts Copilot API traffic and rewrites billing headers, so any client that supports `HTTPS_PROXY` can benefit without reconfiguration
+- **Configurable model mapping** — Glob-pattern-based model name rewriting via a shipped `model_map.json`, CLI flags, env vars, or config file
 - **Streaming support** — Full SSE streaming across all three formats, including real-time format translation
 - **Flexible authentication** — Supports multiple GitHub PATs, environment variables, cached tokens, and interactive device-flow OAuth, with automatic fallback
 - **Multi-worker support** — Spawns multiple worker processes for higher throughput
@@ -138,13 +140,13 @@ When `--quota-limit` is not specified, it defaults to the plan's monthly allowan
 
 ### Config file
 
-All settings can be placed in a JSON config file instead of (or alongside) CLI flags and environment variables. The server looks for `~/.copilot-adapter.json` by default, or you can specify a path with `--config`:
+All settings can be placed in a JSON config file instead of (or alongside) CLI flags and environment variables. The server looks for `~/.config/copilot-api/config.json` by default, or you can specify a path with `--config`:
 
 ```bash
 python copilot_adapter.py serve --config /path/to/config.json
 ```
 
-Example `~/.copilot-adapter.json`:
+Example `~/.config/copilot-api/config.json`:
 
 ```json
 {
@@ -153,8 +155,13 @@ Example `~/.copilot-adapter.json`:
   "strategy": "max-usage",
   "plan": "pro",
   "free": false,
+  "proxy": false,
   "workers": 4,
   "cors_origins": ["*"],
+  "model_map": {
+    "*sonnet*": "claude-sonnet-4.6",
+    "*opus*": "claude-opus-4.6"
+  },
   "accounts": [
     {"token": "ghp_aaa", "plan": "enterprise", "quota_limit": 1000, "premium_used": 250},
     {"token": "ghp_bbb", "plan": "free"},
@@ -177,7 +184,7 @@ All CLI options can be set via environment variables:
 
 | Flag | Environment variable | Default |
 |------|---------------------|---------|
-| `--config` | `COPILOT_ADAPTER_CONFIG` | `~/.copilot-adapter.json` |
+| `--config` | `COPILOT_ADAPTER_CONFIG` | `~/.config/copilot-api/config.json` |
 | `--host` | `COPILOT_ADAPTER_HOST` | `127.0.0.1` |
 | `--port` | `COPILOT_ADAPTER_PORT` | `18080` |
 | `--github-token` | `COPILOT_ADAPTER_GITHUB_TOKEN` | *(none)* |
@@ -188,6 +195,9 @@ All CLI options can be set via environment variables:
 | `--plan` | `COPILOT_ADAPTER_PLAN` | `pro` |
 | `--log-level` | `COPILOT_ADAPTER_LOG_LEVEL` | `info` |
 | `--free` | `COPILOT_ADAPTER_FREE` | *(off)* |
+| `--proxy` | `COPILOT_ADAPTER_PROXY` | *(off)* |
+| `--ca-dir` | `COPILOT_ADAPTER_CA_DIR` | `~/.config/copilot-api` |
+| `--model-map` | `COPILOT_ADAPTER_MODEL_MAP` | `model_map.json` |
 
 Set `NO_COLOR=1` to disable colored log output. Colors are auto-detected on Windows (requires Windows Terminal or VT-enabled console).
 
@@ -278,6 +288,74 @@ This is useful when you want to avoid all premium billing regardless of request 
 
 When using multi-account rotation, agent-initiated requests always stay on the same account as the preceding user request to avoid billing a premium request on a different account.
 
+### Forward proxy mode
+
+Use `--proxy` to enable a forward HTTP/HTTPS proxy on the same port as the API server. In this mode, the server handles both normal API requests (reverse proxy) and forwarded client traffic (forward proxy) on a single port:
+
+```bash
+python copilot_adapter.py serve --proxy
+```
+
+When a client sends a `CONNECT` request to `api.githubcopilot.com`, the proxy performs a MITM (man-in-the-middle) TLS interception and rewrites `X-Initiator: user` to `X-Initiator: agent` so the request is not billed as a premium request. All other traffic is tunneled transparently.
+
+**Client setup:**
+
+```bash
+export HTTPS_PROXY=http://127.0.0.1:18080
+export NODE_EXTRA_CA_CERTS=~/.config/copilot-api/ca.pem
+```
+
+A self-signed CA certificate is generated automatically on first use and stored in `~/.config/copilot-api/` (or the directory specified by `--ca-dir`). The client must trust this CA for HTTPS interception to work. For Node.js-based clients (e.g. Claude Code), set `NODE_EXTRA_CA_CERTS` to the CA certificate path.
+
+This mode is useful when you want to transparently reduce premium billing for any client that supports `HTTPS_PROXY`, without changing the client's API endpoint configuration.
+
+### Model mapping
+
+Model names in incoming requests are rewritten using configurable glob patterns before being sent to the Copilot API. This handles mismatches between model names that clients send (e.g. `claude-3-5-sonnet-latest`) and the names Copilot expects (e.g. `claude-sonnet-4.6`).
+
+The project ships with a default `model_map.json`:
+
+```json
+{
+  "*sonnet*": "claude-sonnet-4.6",
+  "*opus*": "claude-opus-4.6"
+}
+```
+
+Patterns use glob syntax (`*` matches anything) and are checked in order — the first match wins. If no pattern matches, the model name is passed through unchanged.
+
+**Override via CLI** (repeatable, replaces the defaults entirely):
+
+```bash
+python copilot_adapter.py serve \
+  --model-map "*sonnet*=claude-sonnet-4.6" \
+  --model-map "*opus*=claude-opus-4.6" \
+  --model-map "*haiku*=claude-haiku-4.5"
+```
+
+**Override via environment variable** (comma-separated):
+
+```bash
+export COPILOT_ADAPTER_MODEL_MAP="*sonnet*=claude-sonnet-4.6,*opus*=claude-opus-4.6"
+```
+
+**Override via config file:**
+
+```json
+{
+  "model_map": {
+    "*sonnet*": "claude-sonnet-4.6",
+    "*opus*": "claude-opus-4.6",
+    "*haiku*": "claude-haiku-4.5",
+    "gpt-4-turbo": "gpt-4-0125-preview"
+  }
+}
+```
+
+**Precedence**: CLI/env > config file > shipped `model_map.json`.
+
+Model mapping is applied to all endpoints (chat completions, responses, embeddings, Gemini).
+
 ## Client configuration
 
 Point any OpenAI, Anthropic, or Gemini SDK client at the local server:
@@ -332,7 +410,8 @@ Tests use the cheapest available models (`gpt-4o-mini` for chat, `gpt-5-mini` fo
 1. **Device flow OAuth** authenticates with GitHub and stores tokens in `~/.config/copilot-api/tokens.json`
 2. GitHub tokens are exchanged for short-lived Copilot API tokens via `api.github.com/copilot_internal/v2/token`, automatically refreshed every ~25 minutes with concurrent-access protection (double-checked locking ensures only one refresh happens at a time)
 3. For multi-account setups, the `AccountManager` selects which account to use based on the configured rotation strategy, sticking to the same account for agent-initiated follow-ups
-4. Incoming requests are translated (if needed) to the format Copilot expects, proxied to `api.githubcopilot.com`, and responses are translated back to the client's expected format
+4. Incoming requests are translated (if needed) to the format Copilot expects, model names are rewritten via the configurable model map, and requests are proxied to `api.githubcopilot.com` with responses translated back to the client's expected format
+5. In forward proxy mode (`--proxy`), the server also accepts `CONNECT` tunnels on the same port — traffic to `api.githubcopilot.com` is MITM'd to rewrite billing headers, while all other traffic is tunneled transparently
 
 ## Known issues
 
@@ -359,3 +438,26 @@ Install-Module PSReadLine -Force -SkipPublisherCheck
 ```
 
 Restart PowerShell after upgrading. This issue does not affect Windows 11, Windows Terminal, or cmd.exe.
+
+### PATs don't work for organization-managed Copilot seats
+
+The `api.github.com/copilot_internal/v2/token` endpoint returns 404 for `ghp_` Personal Access Tokens when the Copilot seat is managed through a GitHub organization (Business or Enterprise plan). This endpoint only works with OAuth tokens obtained via the device flow (`ghu_` prefix).
+
+**Symptom:** `serve` prints "Authenticated as &lt;username&gt;" but then fails with:
+
+```
+Error: Failed to get Copilot token: Client error '404 Not Found' for url 'https://api.github.com/copilot_internal/v2/token'
+```
+
+**Fix:** Use the device flow instead of a PAT:
+
+```bash
+python copilot_adapter.py login
+```
+
+If you previously added the PAT to the cache, remove it first:
+
+```bash
+python copilot_adapter.py accounts --remove <username>
+python copilot_adapter.py login
+```

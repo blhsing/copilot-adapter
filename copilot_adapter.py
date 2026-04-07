@@ -1,5 +1,6 @@
 """CLI entry point for copilot-api."""
 
+import asyncio
 import json
 import os
 import sys
@@ -8,7 +9,7 @@ from pathlib import Path
 import click
 
 _NUM_CPUS = os.cpu_count() or 1
-_DEFAULT_CONFIG = Path.home() / ".copilot-adapter.json"
+_DEFAULT_CONFIG = Path.home() / ".config" / "copilot-api" / "config.json"
 _VALID_PLANS = ("free", "pro", "pro+", "business", "enterprise")
 
 
@@ -199,11 +200,27 @@ def accounts(add_token: str | None, remove_username: str | None,
 @click.option("--free", "force_free", is_flag=True, default=False,
               envvar="COPILOT_ADAPTER_FREE",
               help="Mark all requests as agent-initiated so nothing counts as a premium request.")
+@click.option("--proxy", "proxy_mode", is_flag=True, default=False,
+              envvar="COPILOT_ADAPTER_PROXY",
+              help="Enable forward proxy mode on the same port. CONNECT requests to "
+                   "api.githubcopilot.com are MITM'd to rewrite X-Initiator: user -> agent. "
+                   "All other traffic is tunneled transparently.")
+@click.option("--ca-dir", default=None, metavar="DIR",
+              envvar="COPILOT_ADAPTER_CA_DIR",
+              help="Directory for the MITM CA certificate and key "
+                   "(default: ~/.config/copilot-api).")
+@click.option("--model-map", multiple=True,
+              envvar="COPILOT_ADAPTER_MODEL_MAP",
+              metavar="PATTERN=TARGET",
+              help="Model name mapping as glob PATTERN=TARGET (repeatable). "
+                   "Env var supports comma-separated values. "
+                   "Overrides the default model_map.json when specified.")
 def serve(config_path: str | None, host: str | None, port: int | None,
           github_token: tuple[str, ...], cors_origin: tuple[str, ...],
           workers: int | None, strategy: str | None,
           quota_limit: int | None, plan: str | None,
-          log_level: str | None, force_free: bool):
+          log_level: str | None, force_free: bool, proxy_mode: bool,
+          ca_dir: str | None, model_map: tuple[str, ...]):
     """Start the OpenAI-compatible API server."""
     import uvicorn
 
@@ -223,8 +240,29 @@ def serve(config_path: str | None, host: str | None, port: int | None,
     plan = plan or cfg.get("plan", "pro")
     log_level = log_level or cfg.get("log_level", "info")
     force_free = force_free or cfg.get("free", False)
+    proxy_mode = proxy_mode or cfg.get("proxy", False)
+    ca_dir = Path(ca_dir) if ca_dir else cfg.get("ca_dir")
+    if isinstance(ca_dir, str):
+        ca_dir = Path(ca_dir)
     if not cors_origin:
         cors_origin = tuple(cfg.get("cors_origins", []))
+
+    # --- Model map: CLI/env > config file > shipped model_map.json ---
+    from lib.server import load_default_model_map
+    model_map_list: list[tuple[str, str]] | None = None
+    if model_map:
+        # CLI/env: parse PATTERN=TARGET entries (supports comma-separated in env)
+        model_map_list = []
+        for raw in model_map:
+            for entry in raw.split(","):
+                entry = entry.strip()
+                if "=" in entry:
+                    pat, _, tgt = entry.partition("=")
+                    model_map_list.append((pat, tgt))
+    elif "model_map" in cfg:
+        # Config file: dict of {pattern: target}
+        model_map_list = list(cfg["model_map"].items())
+    # Otherwise None → init_app will load the shipped default
 
     # --- Resolve accounts ---
     # CLI/env tokens (may include :plan:quota:usage annotations)
@@ -294,7 +332,6 @@ def serve(config_path: str | None, host: str | None, port: int | None,
     )
 
     # Verify all accounts can get a Copilot token
-    import asyncio
     try:
         asyncio.run(acct_mgr.verify_all())
     except Exception as e:
@@ -329,6 +366,10 @@ def serve(config_path: str | None, host: str | None, port: int | None,
         "propagate": False
     }
 
+    if proxy_mode and workers > 1:
+        print("Warning: --proxy mode is not compatible with multiple workers, using 1 worker")
+        workers = 1
+
     if workers > 1:
         # Workers initialize via the lifespan event using env vars
         # Format: "token1:username1:plan1:quota1:usage1,..."
@@ -346,6 +387,10 @@ def serve(config_path: str | None, host: str | None, port: int | None,
             os.environ["_COPILOT_ADAPTER_CORS_ORIGINS"] = ",".join(cors_origin)
         if force_free:
             os.environ["_COPILOT_ADAPTER_FREE"] = "1"
+        if model_map_list is not None:
+            os.environ["_COPILOT_ADAPTER_MODEL_MAP"] = ",".join(
+                f"{p}={t}" for p, t in model_map_list
+            )
 
         # Custom log config to suppress repetitive per-worker lifespan messages
         from uvicorn.config import LOGGING_CONFIG
@@ -363,10 +408,22 @@ def serve(config_path: str | None, host: str | None, port: int | None,
             use_colors=_supports_color(),
         )
     else:
-        application = init_app(acct_mgr, cors_origins=list(cors_origin) or None, force_free=force_free)
-        uvicorn.run(application, host=host, port=port, log_level=log_level,
-                    timeout_graceful_shutdown=5,
-                    use_colors=_supports_color())
+        application = init_app(acct_mgr, cors_origins=list(cors_origin) or None,
+                               force_free=force_free, model_map=model_map_list)
+        if proxy_mode:
+            from lib.forward_proxy import DualModeServer
+            dual = DualModeServer(
+                application, host=host, port=port,
+                ca_dir=ca_dir,
+                uvicorn_log_level=log_level,
+                uvicorn_use_colors=_supports_color(),
+                timeout_graceful_shutdown=5,
+            )
+            asyncio.run(dual.serve())
+        else:
+            uvicorn.run(application, host=host, port=port, log_level=log_level,
+                        timeout_graceful_shutdown=5,
+                        use_colors=_supports_color())
 
 
 if __name__ == "__main__":

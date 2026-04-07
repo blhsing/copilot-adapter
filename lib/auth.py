@@ -10,7 +10,6 @@ from pathlib import Path
 import httpx
 
 GITHUB_CLIENT_ID = "Iv1.b507a08c87ecfe98"
-TOKEN_FILE = Path.home() / ".config" / "copilot-api" / "token.json"
 TOKENS_FILE = Path.home() / ".config" / "copilot-api" / "tokens.json"
 
 HEADERS_BASE = {
@@ -39,24 +38,10 @@ def _save_github_tokens(accounts: list[dict]) -> None:
 
 
 def _load_github_tokens() -> list[dict]:
-    """Load cached accounts. Auto-migrates old single-token format."""
+    """Load cached accounts from the tokens file."""
     if TOKENS_FILE.exists():
         data = json.loads(TOKENS_FILE.read_text())
         return data.get("accounts", [])
-
-    # Migrate from old single-token format
-    if TOKEN_FILE.exists():
-        old_data = json.loads(TOKEN_FILE.read_text())
-        old_token = old_data.get("github_token")
-        if old_token:
-            username = _validate_github_token(old_token)
-            if username:
-                accounts = [{"github_token": old_token, "username": username}]
-                _save_github_tokens(accounts)
-                TOKEN_FILE.unlink()
-                return accounts
-        TOKEN_FILE.unlink()
-
     return []
 
 
@@ -243,9 +228,6 @@ def logout(username: str | None = None) -> None:
     else:
         if TOKENS_FILE.exists():
             TOKENS_FILE.unlink()
-        # Clean up old format too
-        if TOKEN_FILE.exists():
-            TOKEN_FILE.unlink()
         print("Removed all stored credentials.")
 
 
