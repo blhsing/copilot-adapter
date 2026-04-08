@@ -306,9 +306,9 @@ python copilot_adapter.py serve --proxy
 The proxy intercepts HTTPS connections to the following hosts:
 
 - **`api.githubcopilot.com`** — rewrites `X-Initiator: user` to `agent` so requests are not billed as premium
-- **`api.openai.com`**, **`api.anthropic.com`**, **`generativelanguage.googleapis.com`** — redirects requests to the local adapter, so clients configured to use these APIs are transparently routed through Copilot
+- **`api.openai.com`**, **`api.anthropic.com`**, **`generativelanguage.googleapis.com`** — LLM API requests are redirected to the local adapter and routed through Copilot; non-API requests (e.g. update checks, MCP registry) are forwarded to the original host
 
-All other traffic is tunneled transparently.
+All other traffic is tunneled transparently. If `HTTPS_PROXY` or `HTTP_PROXY` is set, outbound connections are chained through the upstream proxy.
 
 **Client setup:**
 
@@ -326,7 +326,14 @@ python copilot_adapter.py ca-cert
 #   Valid:    2026-04-07 to 2036-04-05
 ```
 
-The client must trust this CA for HTTPS interception to work. For Node.js-based clients (e.g. Claude Code), set `NODE_EXTRA_CA_CERTS` to the CA certificate path.
+The client must trust this CA for HTTPS interception to work:
+
+- **Node.js clients** (e.g. Claude Code): set `NODE_EXTRA_CA_CERTS` to the CA certificate path
+- **Electron apps** (e.g. Claude Desktop) and **browsers**: install the CA in the system trust store:
+  ```powershell
+  # Windows (run as Administrator)
+  certutil -addstore Root "%USERPROFILE%\.config\copilot-api\ca.pem"
+  ```
 
 This mode is useful when you want to transparently reduce premium billing for any client that supports `HTTPS_PROXY`, without changing the client's API endpoint configuration.
 

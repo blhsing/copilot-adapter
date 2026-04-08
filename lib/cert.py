@@ -108,7 +108,10 @@ def build_server_ssl_context(
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     # Load from in-memory PEM via tempfiles (cross-platform)
     import tempfile, os
+    # Include both the server cert and the CA cert in the chain
     cert_pem = cert.public_bytes(serialization.Encoding.PEM)
+    ca_pem = ca_cert.public_bytes(serialization.Encoding.PEM)
+    chain_pem = cert_pem + ca_pem
     key_pem = key.private_bytes(
         serialization.Encoding.PEM,
         serialization.PrivateFormat.TraditionalOpenSSL,
@@ -118,7 +121,7 @@ def build_server_ssl_context(
     cert_fd, cert_path = tempfile.mkstemp(suffix=".pem")
     key_fd, key_path = tempfile.mkstemp(suffix=".pem")
     try:
-        os.write(cert_fd, cert_pem)
+        os.write(cert_fd, chain_pem)
         os.close(cert_fd)
         os.write(key_fd, key_pem)
         os.close(key_fd)

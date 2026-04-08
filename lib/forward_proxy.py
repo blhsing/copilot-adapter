@@ -12,6 +12,7 @@ request line:
 
 import asyncio
 import logging
+import os
 import ssl
 import socket
 from pathlib import Path
@@ -31,6 +32,76 @@ _INTERCEPT_HOSTS = {
     "generativelanguage.googleapis.com",
 }
 _BUF = 65536
+
+
+def _get_upstream_proxy() -> tuple[str, int] | None:
+    """Read HTTPS_PROXY / HTTP_PROXY from environment and return (host, port)."""
+    raw = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy") \
+        or os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy")
+    if not raw:
+        return None
+    parsed = urlparse(raw)
+    host = parsed.hostname
+    port = parsed.port or 80
+    if not host:
+        return None
+    return host, port
+
+
+async def _open_upstream(host: str, port: int, *,
+                         tls: bool = False,
+                         ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+    """Connect to host:port, tunnelling through the upstream proxy if set.
+
+    For TLS connections through a proxy, we send CONNECT, wait for 200,
+    then wrap with SSL.
+    """
+    upstream = _get_upstream_proxy()
+
+    if upstream is None:
+        # Direct connection
+        ssl_ctx = ssl.create_default_context() if tls else None
+        return await asyncio.open_connection(host, port, ssl=ssl_ctx)
+
+    proxy_host, proxy_port = upstream
+    reader, writer = await asyncio.open_connection(proxy_host, proxy_port)
+
+    # Ask the upstream proxy to tunnel
+    writer.write(f"CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n\r\n".encode())
+    await writer.drain()
+
+    # Read the proxy response
+    resp_line = await reader.readline()
+    if not resp_line:
+        writer.close()
+        raise ConnectionError(f"Upstream proxy closed connection for CONNECT {host}:{port}")
+
+    # Consume response headers
+    while True:
+        line = await reader.readline()
+        if line in (b"\r\n", b"\n", b""):
+            break
+
+    # Check for 200
+    if b"200" not in resp_line:
+        writer.close()
+        raise ConnectionError(
+            f"Upstream proxy rejected CONNECT {host}:{port}: {resp_line.decode(errors='replace').strip()}"
+        )
+
+    if tls:
+        # TLS upgrade over the tunnel using start_tls
+        ssl_ctx = ssl.create_default_context()
+        loop = asyncio.get_event_loop()
+        transport = writer.transport
+        protocol = transport.get_protocol()
+        new_transport = await loop.start_tls(
+            transport, protocol, ssl_ctx, server_hostname=host,
+        )
+        new_writer = asyncio.StreamWriter(new_transport, protocol, reader, loop)
+        return reader, new_writer
+
+    return reader, writer
 
 
 # ---------------------------------------------------------------------------
@@ -125,40 +196,25 @@ async def _blind_relay(r1: asyncio.StreamReader, w1: asyncio.StreamWriter,
 # MITM path for Copilot
 # ---------------------------------------------------------------------------
 
-async def _tls_upgrade_server(writer: asyncio.StreamWriter,
+async def _tls_upgrade_server(reader: asyncio.StreamReader,
+                              writer: asyncio.StreamWriter,
                               ssl_ctx: ssl.SSLContext,
                               ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter] | None:
-    """Upgrade an existing connection to TLS (server-side).
-
-    Extracts the raw socket, wraps it with SSL in an executor thread,
-    then creates new async reader/writer on the wrapped socket.
-    """
-    transport = writer.transport
-    raw_sock: socket.socket = transport.get_extra_info("socket")
-    if raw_sock is None:
-        return None
-
-    # Detach the socket from asyncio's transport so we can wrap it
-    transport.pause_reading()
-    raw_sock = raw_sock.dup()
-    writer.close()
-    await writer.wait_closed()
-
+    """Upgrade an existing connection to TLS (server-side) using start_tls."""
     loop = asyncio.get_event_loop()
+    transport = writer.transport
+    protocol = transport.get_protocol()
+
     try:
-        ssl_sock = await loop.run_in_executor(
-            None, lambda: ssl_ctx.wrap_socket(raw_sock, server_side=True)
+        new_transport = await loop.start_tls(
+            transport, protocol, ssl_ctx, server_side=True,
         )
-    except ssl.SSLError as exc:
+    except (ssl.SSLError, OSError) as exc:
         logger.debug("TLS handshake failed: %s", exc)
-        raw_sock.close()
+        writer.close()
         return None
 
-    ssl_sock.setblocking(False)
-    reader = asyncio.StreamReader()
-    protocol = asyncio.StreamReaderProtocol(reader)
-    transport_new, _ = await loop.create_connection(lambda: protocol, sock=ssl_sock)
-    new_writer = asyncio.StreamWriter(transport_new, protocol, reader, loop)
+    new_writer = asyncio.StreamWriter(new_transport, protocol, reader, loop)
     return reader, new_writer
 
 
@@ -167,11 +223,10 @@ async def _handle_copilot_mitm(client_reader: asyncio.StreamReader,
     """Parse HTTP requests from the decrypted client stream, rewrite
     X-Initiator, and relay to the real Copilot API."""
 
-    # Open a real TLS connection to the Copilot API
-    upstream_ssl = ssl.create_default_context()
+    # Open a real TLS connection to the Copilot API (via upstream proxy if set)
     try:
-        up_reader, up_writer = await asyncio.open_connection(
-            COPILOT_HOST, 443, ssl=upstream_ssl,
+        up_reader, up_writer = await _open_upstream(
+            COPILOT_HOST, 443, tls=True,
         )
     except Exception as exc:
         logger.error("Failed to connect to %s: %s", COPILOT_HOST, exc)
@@ -281,15 +336,33 @@ async def _handle_copilot_mitm(client_reader: asyncio.StreamReader,
 
 
 # ---------------------------------------------------------------------------
-# MITM path for OpenAI / Anthropic / Gemini → internal Uvicorn
+# MITM path for OpenAI / Anthropic / Gemini → internal Uvicorn or upstream
 # ---------------------------------------------------------------------------
+
+# Paths that should be routed to the internal adapter
+_API_PATH_PREFIXES = (
+    b"/v1/", b"/v1beta/",
+    b"/chat/", b"/responses", b"/messages", b"/embeddings", b"/models",
+)
+
+
+def _is_api_path(request_line: bytes) -> bool:
+    """Check if the request path matches a known LLM API endpoint."""
+    parts = request_line.split()
+    if len(parts) < 2:
+        return False
+    path = parts[1]
+    return any(path.startswith(p) for p in _API_PATH_PREFIXES)
+
 
 async def _handle_rewrite_mitm(client_reader: asyncio.StreamReader,
                                client_writer: asyncio.StreamWriter,
+                               original_host: str,
                                internal_host: str,
                                internal_port: int):
     """Parse HTTP requests from a MITM'd API connection and forward them
-    to the internal Uvicorn server, which translates and proxies to Copilot."""
+    to the internal Uvicorn server (for API paths) or the original host
+    (for everything else)."""
     try:
         while True:
             request_line = await _read_request_line(client_reader)
@@ -299,25 +372,40 @@ async def _handle_rewrite_mitm(client_reader: asyncio.StreamReader,
             headers = await _read_headers(client_reader)
             body = await _read_body(client_reader, headers)
 
-            # Strip Host header (Uvicorn doesn't care) and replace it
-            headers = [
-                (n, v) for n, v in headers
-                if n.lower() != b"host"
-            ]
-            host_val = f"{internal_host}:{internal_port}".encode()
-            headers.append((b"Host", host_val))
-
-            raw = _serialize_request(request_line, headers, body)
-
-            try:
-                up_reader, up_writer = await asyncio.open_connection(
-                    internal_host, internal_port,
-                )
-            except Exception as exc:
-                logger.error("Failed to connect to internal Uvicorn: %s", exc)
-                client_writer.write(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
-                await client_writer.drain()
-                break
+            if _is_api_path(request_line):
+                # Route to internal Uvicorn (reroute to Copilot)
+                req_desc = request_line.rstrip(b"\r\n").decode("ascii", errors="replace")
+                logger.debug("Rerouting %s -> %s to adapter", original_host, req_desc)
+                fwd_headers = [
+                    (n, v) for n, v in headers
+                    if n.lower() != b"host"
+                ]
+                host_val = f"{internal_host}:{internal_port}".encode()
+                fwd_headers.append((b"Host", host_val))
+                raw = _serialize_request(request_line, fwd_headers, body)
+                try:
+                    up_reader, up_writer = await asyncio.open_connection(
+                        internal_host, internal_port,
+                    )
+                except Exception as exc:
+                    logger.error("Failed to connect to internal Uvicorn: %s", exc)
+                    client_writer.write(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
+                    await client_writer.drain()
+                    break
+            else:
+                # Route to the original upstream host (passthrough)
+                req_desc = request_line.rstrip(b"\r\n").decode("ascii", errors="replace")
+                logger.debug("Passing through %s -> %s to %s", original_host, req_desc, original_host)
+                raw = _serialize_request(request_line, headers, body)
+                try:
+                    up_reader, up_writer = await _open_upstream(
+                        original_host, 443, tls=True,
+                    )
+                except Exception as exc:
+                    logger.error("Failed to connect to %s: %s", original_host, exc)
+                    client_writer.write(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
+                    await client_writer.drain()
+                    break
 
             up_writer.write(raw)
             await up_writer.drain()
@@ -437,7 +525,7 @@ async def _do_connect(host: str, port: int,
     if host in _INTERCEPT_HOSTS:
         logger.info("MITM intercepting CONNECT to %s:%d", host, port)
         ssl_ctx = build_server_ssl_context(host, ca_cert, ca_key)
-        result = await _tls_upgrade_server(writer, ssl_ctx)
+        result = await _tls_upgrade_server(reader, writer, ssl_ctx)
         if result is None:
             return
         tls_reader, tls_writer = result
@@ -445,11 +533,11 @@ async def _do_connect(host: str, port: int,
             await _handle_copilot_mitm(tls_reader, tls_writer)
         else:
             await _handle_rewrite_mitm(tls_reader, tls_writer,
-                                       internal_host, internal_port)
+                                       host, internal_host, internal_port)
     else:
         logger.debug("Blind relay CONNECT to %s:%d", host, port)
         try:
-            up_reader, up_writer = await asyncio.open_connection(host, port)
+            up_reader, up_writer = await _open_upstream(host, port)
         except Exception as exc:
             logger.error("Failed to connect to %s:%d: %s", host, port, exc)
             writer.close()
@@ -502,7 +590,7 @@ async def _do_plain_http(method: bytes, url: bytes, version: bytes,
     raw = _serialize_request(request_line, headers, body)
 
     try:
-        up_reader, up_writer = await asyncio.open_connection(host_str, port)
+        up_reader, up_writer = await _open_upstream(host_str, port)
     except Exception as exc:
         logger.error("Failed to connect to %s:%d: %s", host_str, port, exc)
         writer.write(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
