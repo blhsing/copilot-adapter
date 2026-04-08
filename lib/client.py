@@ -49,7 +49,8 @@ class CopilotClient:
     async def stream_chat_completions(
         self, body: dict, *, initiator: str = "user"
     ) -> AsyncIterator[str]:
-        async with httpx.AsyncClient(timeout=120) as client:
+        timeout = httpx.Timeout(connect=30, read=600, write=30, pool=30)
+        async with httpx.AsyncClient(timeout=timeout) as client:
             async with client.stream(
                 "POST",
                 f"{COPILOT_API}/chat/completions",
@@ -76,7 +77,8 @@ class CopilotClient:
     async def stream_responses(
         self, body: dict, *, initiator: str = "user"
     ) -> AsyncIterator[str]:
-        async with httpx.AsyncClient(timeout=120) as client:
+        timeout = httpx.Timeout(connect=30, read=600, write=30, pool=30)
+        async with httpx.AsyncClient(timeout=timeout) as client:
             async with client.stream(
                 "POST",
                 f"{COPILOT_API}/responses",

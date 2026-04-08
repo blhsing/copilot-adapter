@@ -39,16 +39,24 @@ _STREAM_HEADERS = {
 }
 
 
+def _normalize_model_name(name: str) -> str:
+    """Normalize a model name for comparison (lowercase, collapse separators)."""
+    return name.lower().replace(" ", "-").replace("_", "-")
+
+
 def _is_model_match(requested: str, responded: str) -> bool:
     """Check if the response model plausibly matches the requested model.
 
     Handles date-suffixed variants like ``gpt-4o-mini`` vs
-    ``gpt-4o-mini-2024-07-18``.
+    ``gpt-4o-mini-2024-07-18``, and display names like
+    ``Claude Haiku 4.5`` vs ``claude-haiku-4.5``.
     """
+    req = _normalize_model_name(requested)
+    resp = _normalize_model_name(responded)
     return (
-        requested == responded
-        or responded.startswith(requested)
-        or requested.startswith(responded)
+        req == resp
+        or resp.startswith(req)
+        or req.startswith(resp)
     )
 
 
@@ -221,7 +229,9 @@ async def handle_chat_completion(
     billed_status = "yes" if resolved == "user" else "no"
     logger.info("Chat completion requested by %s (billed: %s, model: %s, account: %s)", resolved, billed_status, requested_model, account)
 
-    if adapter.is_streaming(body) or openai_body.get("stream"):
+    is_stream = adapter.is_streaming(body) or openai_body.get("stream")
+
+    if is_stream:
         converter = adapter.create_stream_converter(body)
 
         async def event_stream():
