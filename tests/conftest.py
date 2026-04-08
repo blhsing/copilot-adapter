@@ -3,7 +3,7 @@
 Running the tests requires a valid GitHub Copilot session.  The first time you
 run the suite you will be prompted to authenticate via the GitHub device flow
 (a browser window opens automatically).  Subsequent runs reuse the cached
-token stored in ``~/.config/copilot-api/tokens.json``.
+token stored in ``~/.config/copilot-adapter/tokens.json``.
 """
 
 import pytest

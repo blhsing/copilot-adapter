@@ -10,7 +10,7 @@ from pathlib import Path
 import httpx
 
 GITHUB_CLIENT_ID = "Iv1.b507a08c87ecfe98"
-TOKENS_FILE = Path.home() / ".config" / "copilot-api" / "tokens.json"
+TOKENS_FILE = Path.home() / ".config" / "copilot-adapter" / "tokens.json"
 
 HEADERS_BASE = {
     "accept": "application/json",
@@ -358,7 +358,7 @@ class CopilotTokenManager:
                 )
                 if r.status_code == 401:
                     raise RuntimeError(
-                        "GitHub token rejected. Run `copilot-api login` again."
+                        "GitHub token rejected. Run `copilot-adapter login` again."
                     )
                 r.raise_for_status()
                 data = r.json()
@@ -372,7 +372,7 @@ class CopilotTokenManager:
 # API token management (for protecting the reverse API proxy)
 # ---------------------------------------------------------------------------
 
-API_TOKENS_FILE = Path.home() / ".config" / "copilot-api" / "api_tokens.json"
+API_TOKENS_FILE = Path.home() / ".config" / "copilot-adapter" / "api_tokens.json"
 
 
 def _load_api_tokens() -> list[dict]:

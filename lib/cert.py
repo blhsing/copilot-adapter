@@ -10,7 +10,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 
-DEFAULT_CA_DIR = Path.home() / ".config" / "copilot-api"
+DEFAULT_CA_DIR = Path.home() / ".config" / "copilot-adapter"
 
 _cert_cache: dict[str, tuple[x509.Certificate, rsa.RSAPrivateKey]] = {}
 _cache_lock = threading.Lock()

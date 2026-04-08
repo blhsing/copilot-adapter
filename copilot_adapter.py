@@ -1,4 +1,4 @@
-"""CLI entry point for copilot-api."""
+"""CLI entry point for copilot-adapter."""
 
 import asyncio
 import json
@@ -11,7 +11,7 @@ import click
 from lib.configure import CONFIGURATORS
 
 _NUM_CPUS = os.cpu_count() or 1
-_DEFAULT_CONFIG = Path.home() / ".config" / "copilot-api" / "config.json"
+_DEFAULT_CONFIG = Path.home() / ".config" / "copilot-adapter" / "config.json"
 _VALID_PLANS = ("free", "pro", "pro+", "business", "enterprise")
 
 
@@ -170,7 +170,7 @@ def accounts(add_token: str | None, remove_username: str | None,
 @click.option("--ca-dir", default=None, metavar="DIR",
               envvar="COPILOT_ADAPTER_CA_DIR",
               help="Directory for the CA certificate and key "
-                   "(default: ~/.config/copilot-api).")
+                   "(default: ~/.config/copilot-adapter).")
 def ca_cert(ca_dir: str | None):
     """Generate or show the MITM CA certificate.
 
@@ -304,7 +304,7 @@ def config(tool: str, revert: bool, host: str, port: int,
 @click.option("--ca-dir", default=None, metavar="DIR",
               envvar="COPILOT_ADAPTER_CA_DIR",
               help="Directory for the MITM CA certificate and key "
-                   "(default: ~/.config/copilot-api).")
+                   "(default: ~/.config/copilot-adapter).")
 @click.option("--model-map", "model_map_raw", multiple=True, metavar="PATTERN=TARGET",
               envvar="COPILOT_ADAPTER_MODEL_MAP",
               help="Model mapping as pattern=target (repeatable, e.g. "
