@@ -6,19 +6,19 @@ Authenticates via a GitHub Personal Access Token (PAT) or GitHub's device flow, 
 
 ## Key features
 
-- **Multi-account pooling** — Rotate between multiple GitHub Copilot accounts to pool premium request quotas, with automatic exhaustion detection and account switching
-- **Per-account plan and quota** — Mix accounts on different Copilot tiers with per-account quota limits that auto-derive from the plan
-- **Smart premium request billing** — Automatically avoids extra premium request charges for agentic follow-ups, with no client-side changes needed
-- **Rate limit handling** — Automatically retries on rate limit errors by rotating to the next available account
-- **Three API formats** — Serves OpenAI, Anthropic, and Gemini endpoints simultaneously
-- **Forward proxy mode** — Acts as an HTTP/HTTPS proxy that intercepts Copilot API traffic and rewrites billing headers, and transparently reroutes requests for OpenAI, Anthropic, and Gemini APIs through Copilot
-- **One-command tool setup** — Automatically configure popular agentic coding tools (Claude Code, Codex, Gemini CLI, OpenCode) to use this proxy, with easy revert to defaults
-- **Configurable model mapping** — Glob-pattern-based model name rewriting, with sensible defaults for Claude models
+- [**Multi-account pooling**](#multi-account) — Rotate between multiple GitHub Copilot accounts to pool premium request quotas, with automatic exhaustion detection and account switching
+- [**Per-account plan and quota**](#per-account-plan-and-quota) — Mix accounts on different Copilot tiers with per-account quota limits that auto-derive from the plan
+- [**Smart premium request billing**](#premium-request-billing) — Automatically avoids extra premium request charges for agentic follow-ups, with no client-side changes needed
+- [**Rate limit handling**](#premium-request-billing) — Automatically retries on rate limit errors by rotating to the next available account
+- [**Three API formats**](#endpoints) — Serves OpenAI, Anthropic, and Gemini endpoints simultaneously
+- [**Forward proxy mode**](#forward-proxy-mode) — Acts as an HTTP/HTTPS proxy that intercepts Copilot API traffic and rewrites billing headers, and transparently reroutes requests for OpenAI, Anthropic, and Gemini APIs through Copilot
+- [**One-command tool setup**](#tool-configuration) — Automatically configure popular agentic coding tools (Claude Code, Codex, Gemini CLI, OpenCode) to use this proxy, with easy revert to defaults
+- [**Configurable model mapping**](#model-mapping) — Glob-pattern-based model name rewriting, with sensible defaults for Claude models
 - **Streaming support** — Full SSE streaming across all three formats, including real-time format translation
-- **Flexible authentication** — Supports multiple GitHub PATs, environment variables, cached tokens, and interactive device-flow OAuth, with automatic fallback
+- [**Flexible authentication**](#authentication) — Supports multiple GitHub PATs, environment variables, cached tokens, and interactive device-flow OAuth, with automatic fallback
 - **Multi-worker support** — Spawns multiple worker processes for higher throughput
 - **Concurrent-safe token management** — Only one token refresh happens at a time under concurrent load
-- **Docker ready** — Pre-built image on [GHCR](https://github.com/blhsing/copilot-adapter/pkgs/container/copilot-adapter), or build locally
+- [**Docker ready**](#docker) — Pre-built image on [GHCR](https://github.com/blhsing/copilot-adapter/pkgs/container/copilot-adapter), or build locally
 - **CORS support** — Configurable allowed origins for browser-based applications
 
 ## Prerequisites
