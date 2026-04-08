@@ -233,6 +233,35 @@ def tokens(do_generate: bool, label: str | None, revoke_value: str | None):
 
 
 @main.command()
+@click.argument("tool", type=click.Choice(
+    ["claude-code", "codex", "gemini-cli", "opencode"]))
+@click.option("--revert", is_flag=True, default=False,
+              help="Revert the tool's config back to its default provider.")
+@click.option("--host", default="127.0.0.1", metavar="HOST",
+              help="Proxy host address (default: 127.0.0.1).")
+@click.option("--port", default=18080, type=int, metavar="PORT",
+              help="Proxy port (default: 18080).")
+@click.option("--api-token", default=None, metavar="TOKEN",
+              help="API token for the proxy. If omitted, loads from stored tokens.")
+def config(tool: str, revert: bool, host: str, port: int,
+           api_token: str | None):
+    """Configure an agentic coding tool to use this proxy.
+
+    Supported tools: claude-code, codex, gemini-cli, opencode.
+    Use --revert to restore the tool's original configuration.
+    """
+    from lib.configure import CONFIGURATORS
+
+    if not revert and api_token is None:
+        from lib.auth import get_api_token_values
+        stored = get_api_token_values()
+        if stored:
+            api_token = stored[0]
+
+    CONFIGURATORS[tool](host=host, port=port, api_token=api_token, revert=revert)
+
+
+@main.command()
 @click.option("--config", "config_path", default=None, metavar="PATH",
               envvar="COPILOT_ADAPTER_CONFIG",
               help=f"Path to JSON config file (default: {_DEFAULT_CONFIG}).")
