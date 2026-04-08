@@ -302,8 +302,6 @@ def configure_opencode(*, host: str, port: int,
 # Registry
 # ---------------------------------------------------------------------------
 
-TOOL_NAMES = ("claude-code", "codex", "gemini-cli", "opencode")
-
 CONFIGURATORS = {
     "claude-code": configure_claude_code,
     "codex": configure_codex,
