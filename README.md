@@ -141,13 +141,13 @@ When `--quota-limit` is not specified, it defaults to the plan's monthly allowan
 
 ### Config file
 
-All settings can be placed in a JSON config file instead of (or alongside) CLI flags and environment variables. The server looks for `~/.config/copilot-api/config.json` by default, or you can specify a path with `--config`:
+All settings can be placed in a JSON config file instead of (or alongside) CLI flags and environment variables. The server looks for `~/.config/copilot-adapter/config.json` by default, or you can specify a path with `--config`:
 
 ```bash
 python copilot_adapter.py serve --config /path/to/config.json
 ```
 
-Example `~/.config/copilot-api/config.json`:
+Example `~/.config/copilot-adapter/config.json`:
 
 ```json
 {
@@ -189,7 +189,7 @@ All CLI options can be set via environment variables:
 
 | Flag | Environment variable | Default |
 |------|---------------------|---------|
-| `--config` | `COPILOT_ADAPTER_CONFIG` | `~/.config/copilot-api/config.json` |
+| `--config` | `COPILOT_ADAPTER_CONFIG` | `~/.config/copilot-adapter/config.json` |
 | `--host` | `COPILOT_ADAPTER_HOST` | `127.0.0.1` |
 | `--port` | `COPILOT_ADAPTER_PORT` | `18080` |
 | `--github-token` | `COPILOT_ADAPTER_GITHUB_TOKEN` | *(none)* |
@@ -201,7 +201,7 @@ All CLI options can be set via environment variables:
 | `--log-level` | `COPILOT_ADAPTER_LOG_LEVEL` | `info` |
 | `--free` | `COPILOT_ADAPTER_FREE` | *(off)* |
 | `--proxy` | `COPILOT_ADAPTER_PROXY` | *(off)* |
-| `--ca-dir` | `COPILOT_ADAPTER_CA_DIR` | `~/.config/copilot-api` |
+| `--ca-dir` | `COPILOT_ADAPTER_CA_DIR` | `~/.config/copilot-adapter` |
 | `--model-map` | `COPILOT_ADAPTER_MODEL_MAP` | shipped `model_map.json` |
 | `--proxy-user` | `COPILOT_ADAPTER_PROXY_USER` | *(none)* |
 | `--proxy-password` | `COPILOT_ADAPTER_PROXY_PASSWORD` | *(none)* |
@@ -315,14 +315,14 @@ All other traffic is tunneled transparently. If `HTTPS_PROXY` or `HTTP_PROXY` is
 
 ```bash
 export HTTPS_PROXY=http://127.0.0.1:18080
-export NODE_EXTRA_CA_CERTS=~/.config/copilot-api/ca.pem
+export NODE_EXTRA_CA_CERTS=~/.config/copilot-adapter/ca.pem
 ```
 
-A self-signed CA certificate is generated automatically on first use and stored in `~/.config/copilot-api/` (or the directory specified by `--ca-dir`). Use `ca-cert` to generate the CA ahead of time or show its path:
+A self-signed CA certificate is generated automatically on first use and stored in `~/.config/copilot-adapter/` (or the directory specified by `--ca-dir`). Use `ca-cert` to generate the CA ahead of time or show its path:
 
 ```bash
 python copilot_adapter.py ca-cert
-# CA certificate: ~/.config/copilot-api/ca.pem
+# CA certificate: ~/.config/copilot-adapter/ca.pem
 #   Subject:  CN=copilot-adapter MITM CA
 #   Valid:    2026-04-07 to 2036-04-05
 ```
@@ -333,7 +333,7 @@ The client must trust this CA for HTTPS interception to work:
 - **Electron apps** (e.g. Claude Desktop) and **browsers**: install the CA in the system trust store:
   ```powershell
   # Windows (run as Administrator)
-  certutil -addstore Root "%USERPROFILE%\.config\copilot-api\ca.pem"
+  certutil -addstore Root "%USERPROFILE%\.config\copilot-adapter\ca.pem"
   ```
 
 This mode is useful when you want to transparently reduce premium billing for any client that supports `HTTPS_PROXY`, without changing the client's API endpoint configuration.
@@ -515,7 +515,7 @@ Tests use the cheapest available models (`gpt-4o-mini` for chat, `gpt-5-mini` fo
 
 ## How it works
 
-1. **Device flow OAuth** authenticates with GitHub and stores tokens in `~/.config/copilot-api/tokens.json`
+1. **Device flow OAuth** authenticates with GitHub and stores tokens in `~/.config/copilot-adapter/tokens.json`
 2. GitHub tokens are exchanged for short-lived Copilot API tokens via `api.github.com/copilot_internal/v2/token`, automatically refreshed every ~25 minutes with concurrent-access protection (double-checked locking ensures only one refresh happens at a time)
 3. For multi-account setups, the `AccountManager` selects which account to use based on the configured rotation strategy, sticking to the same account for agent-initiated follow-ups
 4. Incoming requests are translated (if needed) to the format Copilot expects, model names are rewritten via the configurable model map, and requests are proxied to `api.githubcopilot.com` with responses translated back to the client's expected format
