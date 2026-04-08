@@ -431,9 +431,41 @@ export HTTPS_PROXY=http://myuser:mypass@127.0.0.1:18080
 
 Proxy authentication only applies to forward proxy requests (CONNECT and absolute-URL requests). Direct API requests use Bearer token authentication instead.
 
-## Client configuration
+## Tool configuration
 
-Point any OpenAI, Anthropic, or Gemini SDK client at the local server:
+The `config` subcommand automatically configures popular agentic coding tools to point at this proxy:
+
+```bash
+# Configure a tool to use the proxy
+python copilot_adapter.py config claude-code
+python copilot_adapter.py config codex
+python copilot_adapter.py config gemini-cli
+python copilot_adapter.py config opencode
+
+# Revert a tool back to its default provider
+python copilot_adapter.py config claude-code --revert
+python copilot_adapter.py config codex --revert
+
+# Specify a custom host/port or API token
+python copilot_adapter.py config claude-code --host 0.0.0.0 --port 8080 --api-token sk-abc123...
+```
+
+Supported tools:
+
+| Tool | Config file | What it sets |
+|------|------------|-------------|
+| `claude-code` | `~/.claude/settings.json` | `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY` in the `env` block |
+| `codex` | `~/.codex/config.toml` | `model_provider` and `[model_providers.copilot-adapter]` section |
+| `gemini-cli` | `~/.gemini/settings.json` | `baseUrl` and `apiKey` fields |
+| `opencode` | `~/.config/opencode/opencode.json` | `copilot-adapter` provider block |
+
+A `.bak` backup is created before modifying any config file. When reverting, the backup is restored if it exists; otherwise the added keys are removed.
+
+If `--api-token` is not specified, the first stored API token (from `tokens --generate`) is used automatically, if any.
+
+### Manual client configuration
+
+You can also point any OpenAI, Anthropic, or Gemini SDK client at the local server manually:
 
 ```bash
 # OpenAI

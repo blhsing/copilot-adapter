@@ -18,6 +18,7 @@ import socket
 from pathlib import Path
 from urllib.parse import urlparse
 
+import httpx
 import uvicorn
 
 from .cert import ca_paths, ensure_ca, build_server_ssl_context
@@ -98,8 +99,13 @@ async def _open_upstream(host: str, port: int, *,
         new_transport = await loop.start_tls(
             transport, protocol, ssl_ctx, server_hostname=host,
         )
-        new_writer = asyncio.StreamWriter(new_transport, protocol, reader, loop)
-        return reader, new_writer
+        # Create a fresh reader/protocol — start_tls breaks the old reader
+        new_reader = asyncio.StreamReader()
+        new_protocol = asyncio.StreamReaderProtocol(new_reader)
+        new_protocol.connection_made(new_transport)
+        new_transport.set_protocol(new_protocol)
+        new_writer = asyncio.StreamWriter(new_transport, new_protocol, new_reader, loop)
+        return new_reader, new_writer
 
     return reader, writer
 
@@ -393,19 +399,58 @@ async def _handle_rewrite_mitm(client_reader: asyncio.StreamReader,
                     await client_writer.drain()
                     break
             else:
-                # Route to the original upstream host (passthrough)
+                # Route to the original upstream host via httpx (passthrough)
                 req_desc = request_line.rstrip(b"\r\n").decode("ascii", errors="replace")
                 logger.debug("Passing through %s -> %s to %s", original_host, req_desc, original_host)
-                raw = _serialize_request(request_line, headers, body)
+
+                parts = request_line.split()
+                method_str = parts[0].decode("ascii")
+                path_str = parts[1].decode("ascii", errors="replace")
+                url = f"https://{original_host}{path_str}"
+
+                # Convert headers to dict (httpx format)
+                hdr_dict = {}
+                for n, v in headers:
+                    name_str = n.decode("ascii", errors="replace")
+                    # Skip hop-by-hop headers
+                    if name_str.lower() in ("transfer-encoding", "connection",
+                                            "keep-alive", "proxy-connection"):
+                        continue
+                    hdr_dict[name_str] = v.decode("ascii", errors="replace")
+
                 try:
-                    up_reader, up_writer = await _open_upstream(
-                        original_host, 443, tls=True,
-                    )
+                    async with httpx.AsyncClient(proxy=os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")) as hx:
+                        resp = await hx.request(
+                            method_str, url, headers=hdr_dict,
+                            content=body if body else None,
+                            follow_redirects=False,
+                        )
                 except Exception as exc:
-                    logger.error("Failed to connect to %s: %s", original_host, exc)
+                    logger.error("Passthrough to %s failed: %s", original_host, exc)
                     client_writer.write(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
                     await client_writer.drain()
                     break
+
+                # Write HTTP response back to client
+                status_line = f"HTTP/1.1 {resp.status_code} {resp.reason_phrase}\r\n".encode()
+                client_writer.write(status_line)
+                resp_body = resp.content
+                for key, val in resp.headers.raw:
+                    # Skip headers we rewrite or that are hop-by-hop;
+                    # also skip content-encoding/content-length since httpx
+                    # auto-decompresses and we set our own content-length
+                    if key.lower() in (b"transfer-encoding", b"connection",
+                                       b"content-encoding", b"content-length"):
+                        continue
+                    client_writer.write(key + b": " + val + b"\r\n")
+                client_writer.write(f"Content-Length: {len(resp_body)}\r\n".encode())
+                client_writer.write(b"Connection: keep-alive\r\n")
+                client_writer.write(b"\r\n")
+                client_writer.write(resp_body)
+                await client_writer.drain()
+
+                logger.debug("Passthrough response: %d %s", resp.status_code, resp.reason_phrase)
+                continue
 
             up_writer.write(raw)
             await up_writer.drain()
