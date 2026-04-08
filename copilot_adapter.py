@@ -10,7 +10,6 @@ import click
 
 from lib.configure import CONFIGURATORS
 
-_NUM_CPUS = os.cpu_count() or 1
 _DEFAULT_CONFIG = Path.home() / ".config" / "copilot-adapter" / "config.json"
 _VALID_PLANS = ("free", "pro", "pro+", "business", "enterprise")
 
@@ -277,7 +276,7 @@ def config(tool: str, revert: bool, host: str, port: int,
               help="Allowed CORS origin (repeatable). Use '*' to allow all origins.")
 @click.option("--workers", default=None, type=int, envvar="COPILOT_ADAPTER_WORKERS",
               metavar="N",
-              help=f"Number of worker processes (default: number of CPUs, {_NUM_CPUS}).")
+              help="Number of worker processes (default: 1).")
 @click.option("--strategy", default=None,
               type=click.Choice(["max-usage", "min-usage", "round-robin"]),
               envvar="COPILOT_ADAPTER_STRATEGY",
@@ -342,7 +341,7 @@ def serve(config_path: str | None, host: str | None, port: int | None,
     # --- Merge: CLI/env > config file > defaults ---
     host = host or cfg.get("host", "127.0.0.1")
     port = port or cfg.get("port", 18080)
-    workers = workers if workers is not None else cfg.get("workers", _NUM_CPUS)
+    workers = workers if workers is not None else cfg.get("workers", 1)
     strategy = strategy or cfg.get("strategy", "max-usage")
     quota_limit = quota_limit if quota_limit is not None else cfg.get("quota_limit")
     plan = plan or cfg.get("plan", "pro")

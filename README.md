@@ -50,7 +50,7 @@ python copilot_adapter.py serve
 # Options
 python copilot_adapter.py serve --host 0.0.0.0 --port 18080
 
-# Multiple worker processes for higher throughput (default: number of CPUs)
+# Multiple worker processes for higher throughput (default: 1)
 python copilot_adapter.py serve --workers 4
 
 # Remove stored credentials
@@ -194,7 +194,7 @@ All CLI options can be set via environment variables:
 | `--port` | `COPILOT_ADAPTER_PORT` | `18080` |
 | `--github-token` | `COPILOT_ADAPTER_GITHUB_TOKEN` | *(none)* |
 | `--cors-origin` | `COPILOT_ADAPTER_CORS_ORIGIN` | *(none)* |
-| `--workers` | `COPILOT_ADAPTER_WORKERS` | number of CPUs |
+| `--workers` | `COPILOT_ADAPTER_WORKERS` | `1` |
 | `--strategy` | `COPILOT_ADAPTER_STRATEGY` | `max-usage` |
 | `--quota-limit` | `COPILOT_ADAPTER_QUOTA_LIMIT` | per plan |
 | `--plan` | `COPILOT_ADAPTER_PLAN` | `pro` |
