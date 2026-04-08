@@ -12,6 +12,7 @@ Authenticates via a GitHub Personal Access Token (PAT) or GitHub's device flow, 
 - **Rate limit handling** — Automatically retries on rate limit errors by rotating to the next available account
 - **Three API formats** — Serves OpenAI, Anthropic, and Gemini endpoints simultaneously
 - **Forward proxy mode** — Acts as an HTTP/HTTPS proxy that intercepts Copilot API traffic and rewrites billing headers, and transparently reroutes requests for OpenAI, Anthropic, and Gemini APIs through Copilot
+- **One-command tool setup** — `config` subcommand to configure Claude Code, Codex, Gemini CLI, and OpenCode to use this proxy, with `--revert` to restore defaults
 - **Configurable model mapping** — Glob-pattern-based model name rewriting, with sensible defaults for Claude models
 - **Streaming support** — Full SSE streaming across all three formats, including real-time format translation
 - **Flexible authentication** — Supports multiple GitHub PATs, environment variables, cached tokens, and interactive device-flow OAuth, with automatic fallback
