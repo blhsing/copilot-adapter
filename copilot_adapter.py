@@ -234,7 +234,7 @@ def tokens(do_generate: bool, label: str | None, revoke_value: str | None):
 
 @main.command()
 @click.argument("tool", type=click.Choice(
-    ["claude-code", "codex", "gemini-cli", "opencode"]))
+    list(__import__("lib.configure", fromlist=["CONFIGURATORS"]).CONFIGURATORS)))
 @click.option("--revert", is_flag=True, default=False,
               help="Revert the tool's config back to its default provider.")
 @click.option("--host", default="127.0.0.1", metavar="HOST",
