@@ -347,8 +347,21 @@ async def _handle_copilot_mitm(client_reader: asyncio.StreamReader,
 
 # Paths that should be routed to the internal adapter
 _API_PATH_PREFIXES = (
-    b"/v1/", b"/v1beta/",
-    b"/chat/", b"/responses", b"/messages", b"/embeddings", b"/models",
+    # OpenAI
+    b"/v1/chat/completions",
+    b"/v1/responses",
+    b"/v1/embeddings",
+    b"/v1/models",
+    # Anthropic
+    b"/v1/messages",
+    # Gemini
+    b"/v1beta/models",
+    # Legacy / catch-all
+    b"/chat/completions",
+    b"/responses",
+    b"/messages",
+    b"/embeddings",
+    b"/models",
 )
 
 
@@ -357,8 +370,9 @@ def _is_api_path(request_line: bytes) -> bool:
     parts = request_line.split()
     if len(parts) < 2:
         return False
-    path = parts[1]
-    return any(path.startswith(p) for p in _API_PATH_PREFIXES)
+    path = parts[1].split(b"?")[0]
+    return any(path == p or path.startswith(p + b"/")
+               for p in _API_PATH_PREFIXES)
 
 
 async def _handle_rewrite_mitm(client_reader: asyncio.StreamReader,
