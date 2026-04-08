@@ -8,6 +8,8 @@ from pathlib import Path
 
 import click
 
+from lib.configure import CONFIGURATORS
+
 _NUM_CPUS = os.cpu_count() or 1
 _DEFAULT_CONFIG = Path.home() / ".config" / "copilot-api" / "config.json"
 _VALID_PLANS = ("free", "pro", "pro+", "business", "enterprise")
@@ -233,8 +235,7 @@ def tokens(do_generate: bool, label: str | None, revoke_value: str | None):
 
 
 @main.command()
-@click.argument("tool", type=click.Choice(
-    list(__import__("lib.configure", fromlist=["CONFIGURATORS"]).CONFIGURATORS)))
+@click.argument("tool", type=click.Choice(list(CONFIGURATORS)))
 @click.option("--revert", is_flag=True, default=False,
               help="Revert the tool's config back to its default provider.")
 @click.option("--host", default="127.0.0.1", metavar="HOST",
@@ -250,8 +251,6 @@ def config(tool: str, revert: bool, host: str, port: int,
     Supported tools: claude-code, codex, gemini-cli, opencode.
     Use --revert to restore the tool's original configuration.
     """
-    from lib.configure import CONFIGURATORS
-
     if not revert and api_token is None:
         from lib.auth import get_api_token_values
         stored = get_api_token_values()
