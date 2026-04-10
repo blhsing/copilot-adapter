@@ -14,8 +14,7 @@ Authenticates via a GitHub Personal Access Token (PAT) or GitHub's device flow, 
 - [**Forward proxy mode**](#forward-proxy-mode) — Acts as an HTTP/HTTPS proxy that intercepts Copilot API traffic and rewrites billing headers, and transparently reroutes requests for OpenAI, Anthropic, and Gemini APIs through Copilot
 - [**One-command tool setup**](#tool-configuration) — Automatically configure popular agentic coding tools (Claude Code, Codex, Gemini CLI, OpenCode) to use this proxy, with easy revert to defaults
 - [**Configurable model mapping**](#model-mapping) — Glob-pattern-based model name rewriting, with sensible defaults for Claude models
-- [**Server-side web search**](#server-side-web-search) — Intercepts `web_search` tool calls and executes them server-side via DuckDuckGo, so models can search the web without client support
-- [**Anthropic built-in tool conversion**](#anthropic-built-in-tools) — Converts Anthropic built-in tool types (`web_search`, `text_editor`, `code_execution`) to standard function tools instead of stripping them
+- [**Server-side web search**](#server-side-web-search) — Converts Anthropic's built-in `web_search` tool type to a function tool and intercepts it server-side via DuckDuckGo; strips other unsupported built-in types
 - **Streaming support** — Full SSE streaming across all three formats, including real-time format translation
 - [**Flexible authentication**](#authentication) — Supports multiple GitHub PATs, environment variables, cached tokens, and interactive device-flow OAuth, with automatic fallback
 - **Multi-worker support** — Spawns multiple worker processes for higher throughput
@@ -500,15 +499,10 @@ The model may call `web_search` multiple times in a single request (e.g. refinin
 
 ## Anthropic built-in tools
 
-Anthropic clients (e.g. Claude Code) may send built-in tool types like `web_search_20250305`, `text_editor_20250124`, and `code_execution_20250522`. The Copilot API doesn't support these type-prefixed tools. The adapter converts them to standard OpenAI function tools:
+Anthropic clients (e.g. Claude Code) may send built-in tool types like `web_search_20250305`, `text_editor_20250124`, and `code_execution_20250522`. The Copilot API doesn't support these type-prefixed tools. The adapter handles them as follows:
 
-| Anthropic built-in type | Converted to function tool |
-|------------------------|---------------------------|
-| `web_search_*` | `web_search` (intercepted server-side) |
-| `text_editor_*` | `str_replace_editor` (passed to client) |
-| `code_execution_*` | `code_execution` (passed to client) |
-
-The tool name is preserved from the original request (e.g. if the client sends `name: "str_replace_editor"`, that name is used). Each converted tool includes the full input schema so the model can call it correctly.
+- **`web_search_*`** — Converted to a `web_search` function tool and [intercepted server-side](#server-side-web-search)
+- **Other built-in types** (e.g. `text_editor_*`, `code_execution_*`) — Stripped from the request, since these are handled client-side and don't need to be sent to the model
 
 ## Available models
 
