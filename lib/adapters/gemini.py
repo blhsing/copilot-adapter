@@ -240,6 +240,7 @@ class _GeminiStreamConverter(StreamConverter):
         self._model = model
         self._prompt_tokens = 0
         self._completion_tokens = 0
+        self._finish_reason: str | None = None
 
     def format_error(self, error_line: str) -> str:
         return f"data: {error_line}\n\n"
@@ -254,6 +255,17 @@ class _GeminiStreamConverter(StreamConverter):
 
         payload = line[6:].strip()
         if payload == "[DONE]":
+            if self._finish_reason is not None:
+                gemini_resp = {
+                    "candidates": [{"finishReason": _FINISH_MAP.get(self._finish_reason, "STOP")}],
+                    "usageMetadata": {
+                        "promptTokenCount": self._prompt_tokens,
+                        "candidatesTokenCount": self._completion_tokens,
+                        "totalTokenCount": self._prompt_tokens + self._completion_tokens,
+                    },
+                    "modelVersion": self._model,
+                }
+                return f"data: {json.dumps(gemini_resp)}\n\n"
             return ""
 
         try:
@@ -265,7 +277,7 @@ class _GeminiStreamConverter(StreamConverter):
         delta = choice.get("delta", {})
         finish_reason = choice.get("finish_reason")
 
-        chunk_usage = data.get("usage", {})
+        chunk_usage = data.get("usage") or {}
         if chunk_usage.get("prompt_tokens"):
             self._prompt_tokens = chunk_usage["prompt_tokens"]
         if chunk_usage.get("completion_tokens"):
@@ -302,18 +314,10 @@ class _GeminiStreamConverter(StreamConverter):
         if parts:
             candidate["content"] = {"role": "model", "parts": parts}
 
-        if finish_reason:
-            candidate["finishReason"] = _FINISH_MAP.get(finish_reason, "STOP")
-
         gemini_resp = {"candidates": [candidate]}
 
         if finish_reason:
-            gemini_resp["usageMetadata"] = {
-                "promptTokenCount": self._prompt_tokens,
-                "candidatesTokenCount": self._completion_tokens,
-                "totalTokenCount": self._prompt_tokens + self._completion_tokens,
-            }
-            gemini_resp["modelVersion"] = self._model
+            self._finish_reason = finish_reason
 
         return f"data: {json.dumps(gemini_resp)}\n\n"
 

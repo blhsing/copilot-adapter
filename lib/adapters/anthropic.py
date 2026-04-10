@@ -120,33 +120,50 @@ def _anthropic_to_openai(body: dict) -> dict:
     if "stop_sequences" in body:
         result["stop"] = body["stop_sequences"]
 
+    # Anthropic built-in tool types that cannot be translated to OpenAI
+    # function tools (they are server-side features, not callable functions).
+    _BUILTIN_TOOL_PREFIXES = ("web_search", "text_editor", "code_execution")
+
     if "tools" in body:
-        result["tools"] = [
-            {
+        func_tools = []
+        for t in body["tools"]:
+            tool_type = t.get("type", "")
+            # Skip Anthropic built-in tools
+            if any(tool_type.startswith(p) for p in _BUILTIN_TOOL_PREFIXES):
+                continue
+            func_tools.append({
                 "type": "function",
                 "function": {
                     "name": t["name"],
                     "description": t.get("description", ""),
                     "parameters": t.get("input_schema", {}),
                 },
-            }
-            for t in body["tools"]
-        ]
+            })
+        if func_tools:
+            result["tools"] = func_tools
 
     tc = body.get("tool_choice")
     if tc:
         tc_type = tc.get("type") if isinstance(tc, dict) else tc
-        if tc_type == "auto":
+        # If tool_choice references a specific tool that was stripped, fall back
+        if tc_type == "tool":
+            forced_name = tc.get("name", "")
+            has_tool = any(
+                ft["function"]["name"] == forced_name
+                for ft in result.get("tools", [])
+            )
+            if has_tool:
+                result["tool_choice"] = {
+                    "type": "function",
+                    "function": {"name": forced_name},
+                }
+            # else: tool was stripped, omit tool_choice entirely
+        elif tc_type == "auto":
             result["tool_choice"] = "auto"
         elif tc_type == "any":
             result["tool_choice"] = "required"
         elif tc_type == "none":
             result["tool_choice"] = "none"
-        elif tc_type == "tool":
-            result["tool_choice"] = {
-                "type": "function",
-                "function": {"name": tc["name"]},
-            }
 
     return result
 
@@ -220,6 +237,7 @@ class _AnthropicStreamConverter(StreamConverter):
         self._tool_blocks: dict[int, dict] = {}
         self._input_tokens = 0
         self._output_tokens = 0
+        self._stop_reason: str | None = None
 
     def _event(self, event_type: str, data: dict) -> str:
         return f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
@@ -244,10 +262,14 @@ class _AnthropicStreamConverter(StreamConverter):
                     "type": "content_block_stop",
                     "index": self._block_index,
                 })
+            stop = self._stop_reason or "end_turn"
             output += self._event("message_delta", {
                 "type": "message_delta",
-                "delta": {"stop_reason": "end_turn", "stop_sequence": None},
-                "usage": {"output_tokens": self._output_tokens},
+                "delta": {"stop_reason": stop, "stop_sequence": None},
+                "usage": {
+                    "input_tokens": self._input_tokens,
+                    "output_tokens": self._output_tokens,
+                },
             })
             output += self._event("message_stop", {"type": "message_stop"})
             return output
@@ -261,7 +283,7 @@ class _AnthropicStreamConverter(StreamConverter):
         delta = choice.get("delta", {})
         finish_reason = choice.get("finish_reason")
 
-        chunk_usage = data.get("usage", {})
+        chunk_usage = data.get("usage") or {}
         if chunk_usage.get("prompt_tokens"):
             self._input_tokens = chunk_usage["prompt_tokens"]
         if chunk_usage.get("completion_tokens"):
@@ -351,16 +373,7 @@ class _AnthropicStreamConverter(StreamConverter):
                     "index": self._block_index,
                 })
                 self._block_started = False
-
-            output += self._event("message_delta", {
-                "type": "message_delta",
-                "delta": {
-                    "stop_reason": _STOP_REASON_MAP.get(finish_reason, "end_turn"),
-                    "stop_sequence": None,
-                },
-                "usage": {"output_tokens": self._output_tokens},
-            })
-            output += self._event("message_stop", {"type": "message_stop"})
+            self._stop_reason = _STOP_REASON_MAP.get(finish_reason, "end_turn")
 
         return output
 
