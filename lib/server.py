@@ -223,6 +223,11 @@ async def handle_chat_completion(
     openai_body["model"] = _apply_model_map(openai_body.get("model", ""))
     requested_model = openai_body.get("model", "")
 
+    # Log tool names if any tools are present
+    tool_names = [t["function"]["name"] for t in openai_body.get("tools", [])]
+    if tool_names:
+        logger.info("Tools in request: %s", ", ".join(tool_names))
+
     client = await account_mgr.get_client(initiator=resolved)
     account = account_mgr.get_username(client)
 
