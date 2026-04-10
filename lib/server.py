@@ -1,5 +1,6 @@
 """OpenAI-compatible API server that proxies to GitHub Copilot."""
 
+import asyncio
 import json
 import logging
 import os
@@ -81,6 +82,126 @@ def _apply_model_map(model: str) -> str:
                 logger.debug("Model map: %s -> %s (pattern: %s)", model, target, pattern)
             return target
     return model
+
+
+# ---------------------------------------------------------------------------
+# Web search via DuckDuckGo (server-side execution for web_search tool calls)
+# ---------------------------------------------------------------------------
+
+def _extract_tool_calls_from_stream(lines: list[str]) -> list[dict]:
+    """Reassemble streamed tool call deltas into complete tool call objects."""
+    tool_calls: dict[int, dict] = {}
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line.startswith("data: "):
+            continue
+        payload = line[6:].strip()
+        if payload == "[DONE]":
+            continue
+        try:
+            data = json.loads(payload)
+        except json.JSONDecodeError:
+            continue
+        choice = (data.get("choices") or [{}])[0]
+        delta = choice.get("delta", {})
+        for tc in delta.get("tool_calls", []):
+            idx = tc.get("index", 0)
+            func = tc.get("function", {})
+            if idx not in tool_calls:
+                tool_calls[idx] = {
+                    "id": tc.get("id", ""),
+                    "type": "function",
+                    "function": {"name": "", "arguments": ""},
+                }
+            entry = tool_calls[idx]
+            if tc.get("id"):
+                entry["id"] = tc["id"]
+            if func.get("name"):
+                entry["function"]["name"] = func["name"]
+            entry["function"]["arguments"] += func.get("arguments", "")
+    result = [tool_calls[i] for i in sorted(tool_calls)]
+    if result:
+        logger.info(
+            "Extracted %d tool call(s) from stream: %s",
+            len(result),
+            ", ".join(tc["function"]["name"] for tc in result),
+        )
+    return result
+
+
+def _extract_text_from_stream(lines: list[str]) -> str:
+    """Extract accumulated text content from buffered SSE lines."""
+    parts = []
+    for raw_line in lines:
+        stripped = raw_line.strip()
+        if not stripped.startswith("data: "):
+            continue
+        payload = stripped[6:].strip()
+        if payload == "[DONE]":
+            continue
+        try:
+            chunk = json.loads(payload)
+            choice = (chunk.get("choices") or [{}])[0]
+            delta = choice.get("delta", {})
+            if delta.get("content"):
+                parts.append(delta["content"])
+        except (json.JSONDecodeError, IndexError):
+            pass
+    return "".join(parts)
+
+
+def _do_web_search(query: str, max_results: int = 5) -> str:
+    """Run a DuckDuckGo search synchronously and return formatted results."""
+    try:
+        from ddgs import DDGS
+    except ImportError:
+        logger.warning("ddgs package not installed — web_search unavailable")
+        return "Web search is not available (ddgs package not installed)."
+
+    proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY") or None
+    try:
+        results = DDGS(proxy=proxy).text(query, max_results=max_results)
+    except Exception as e:
+        logger.error("DuckDuckGo search failed: %s", e)
+        return f"Web search error: {e}"
+
+    if not results:
+        return "No search results found."
+
+    lines = []
+    for r in results:
+        lines.append(f"[{r.get('title', '')}]({r.get('href', '')})")
+        lines.append(r.get("body", ""))
+        lines.append("")
+    text = "\n".join(lines).strip()
+    logger.info("Web search returned %d results (%d chars) for query=%r",
+                len(results), len(text), query)
+    return text
+
+
+async def _execute_web_search_calls(tool_calls: list[dict]) -> list[dict]:
+    """Execute web_search tool calls via DuckDuckGo.
+
+    Returns a list of OpenAI-format tool result messages.
+    """
+    results = []
+    for tc in tool_calls:
+        if tc["function"]["name"] != "web_search":
+            continue
+        try:
+            args = json.loads(tc["function"]["arguments"])
+        except json.JSONDecodeError:
+            args = {}
+        query = args.get("query", "")
+        logger.info("Executing web_search: query=%r", query)
+        # ddgs is synchronous — run in a thread to avoid blocking the event loop
+        text = await asyncio.to_thread(_do_web_search, query)
+        results.append({
+            "role": "tool",
+            "tool_call_id": tc["id"],
+            "content": text,
+        })
+    return results
 
 
 @asynccontextmanager
@@ -242,10 +363,13 @@ async def handle_chat_completion(
         converter = adapter.create_stream_converter(body)
 
         async def event_stream():
-            nonlocal client, converter
+            nonlocal client, converter, openai_body
             while True:
                 first_chunk = True
                 needs_retry = False
+                buffered_lines: list[str] = []
+                has_tool_calls = False
+
                 async for line in client.stream_chat_completions(
                     openai_body, initiator=resolved
                 ):
@@ -286,18 +410,68 @@ async def handle_chat_completion(
                                 if not _force_free:
                                     await account_mgr.record_usage(client, requested_model)
 
-                    result = converter.feed(line)
-                    if result:
-                        yield result
+                    # Detect tool calls — buffer if found for web_search interception
+                    stripped = line.strip()
+                    if stripped.startswith("data: ") and stripped[6:].strip() != "[DONE]":
+                        try:
+                            chunk = json.loads(stripped[6:])
+                            choice = (chunk.get("choices") or [{}])[0]
+                            delta = choice.get("delta", {})
+                            if delta.get("tool_calls"):
+                                if not has_tool_calls:
+                                    logger.info("Tool call detected in stream — buffering")
+                                has_tool_calls = True
+                        except (json.JSONDecodeError, IndexError):
+                            pass
 
-                if not needs_retry:
+                    if has_tool_calls:
+                        buffered_lines.append(line)
+                    else:
+                        result = converter.feed(line)
+                        if result:
+                            yield result
+
+                if needs_retry:
+                    continue
+
+                if not has_tool_calls:
                     return
+
+                # Check buffered tool calls for web_search
+                tool_calls = _extract_tool_calls_from_stream(buffered_lines)
+                web_calls = [tc for tc in tool_calls if tc["function"]["name"] == "web_search"]
+                non_web = [tc for tc in tool_calls if tc["function"]["name"] != "web_search"]
+
+                if not web_calls or non_web:
+                    # No web_search, or mixed with other tools — flush through
+                    for bl in buffered_lines:
+                        result = converter.feed(bl)
+                        if result:
+                            yield result
+                    return
+
+                # Pure web_search — execute server-side and continue
+                logger.info("Intercepting %d web_search call(s)", len(web_calls))
+                search_results = await _execute_web_search_calls(web_calls)
+
+                assistant_msg = {
+                    "role": "assistant",
+                    "content": _extract_text_from_stream(buffered_lines) or None,
+                    "tool_calls": tool_calls,
+                }
+                openai_body["messages"].append(assistant_msg)
+                openai_body["messages"].extend(search_results)
+
+                logger.info("Continuing after web_search (messages: %d)",
+                            len(openai_body["messages"]))
+                converter = adapter.create_stream_converter(body)
+                continue
 
         return StreamingResponse(
             event_stream(), media_type="text/event-stream", headers=_STREAM_HEADERS
         )
 
-    # Non-streaming — retry loop for 429 and model mismatch
+    # Non-streaming
     while True:
         resp = await client.chat_completions(openai_body, initiator=resolved)
         if resp.status_code == 429:
@@ -306,7 +480,6 @@ async def handle_chat_completion(
             if fallback is not None:
                 client = fallback
                 continue
-            # All accounts exhausted, return the 429
 
         if resp.status_code != 200:
             logger.error("API error %s: %s", resp.status_code, resp.text)
@@ -333,6 +506,42 @@ async def handle_chat_completion(
 
     if not _force_free:
         await account_mgr.record_usage(client, requested_model)
+
+    # Check for web_search in non-streaming response
+    choice = (resp_data.get("choices") or [{}])[0]
+    message = choice.get("message", {})
+    tool_calls = message.get("tool_calls", [])
+    web_calls = [tc for tc in tool_calls if tc.get("function", {}).get("name") == "web_search"]
+    non_web = [tc for tc in tool_calls if tc.get("function", {}).get("name") != "web_search"]
+
+    # Loop: intercept pure web_search calls, re-query until no more
+    while web_calls and not non_web:
+        logger.info("Intercepting %d web_search call(s) (non-streaming)", len(web_calls))
+        search_results = await _execute_web_search_calls(tool_calls)
+        openai_body["messages"].append({
+            "role": "assistant",
+            "content": message.get("content"),
+            "tool_calls": tool_calls,
+        })
+        openai_body["messages"].extend(search_results)
+
+        resp = await client.chat_completions(openai_body, initiator=resolved)
+        if resp.status_code != 200:
+            logger.error("API error %s on web_search continuation: %s",
+                         resp.status_code, resp.text)
+            try:
+                content = resp.json()
+            except Exception:
+                content = {"error": {"message": resp.text}}
+            return JSONResponse(content=content, status_code=resp.status_code)
+
+        resp_data = resp.json()
+        choice = (resp_data.get("choices") or [{}])[0]
+        message = choice.get("message", {})
+        tool_calls = message.get("tool_calls", [])
+        web_calls = [tc for tc in tool_calls if tc.get("function", {}).get("name") == "web_search"]
+        non_web = [tc for tc in tool_calls if tc.get("function", {}).get("name") != "web_search"]
+
     return JSONResponse(
         content=adapter.convert_chat_response(resp_data, body),
         status_code=resp.status_code,
@@ -518,9 +727,18 @@ async def count_tokens(request: Request):
     except Exception:
         body = {}
 
+    model = body.get("model", "unknown")
+    num_messages = len(body.get("messages", []))
+    num_tools = len(body.get("tools", []))
+
     # Simple heuristic: ~4 chars per token for text content
     text_content = json.dumps(body)
     token_count = max(1, len(text_content) // 4)
+
+    logger.info(
+        "count_tokens: model=%s messages=%d tools=%d -> %d tokens",
+        model, num_messages, num_tools, token_count,
+    )
 
     return JSONResponse(content={"input_tokens": token_count})
 

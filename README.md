@@ -14,6 +14,8 @@ Authenticates via a GitHub Personal Access Token (PAT) or GitHub's device flow, 
 - [**Forward proxy mode**](#forward-proxy-mode) — Acts as an HTTP/HTTPS proxy that intercepts Copilot API traffic and rewrites billing headers, and transparently reroutes requests for OpenAI, Anthropic, and Gemini APIs through Copilot
 - [**One-command tool setup**](#tool-configuration) — Automatically configure popular agentic coding tools (Claude Code, Codex, Gemini CLI, OpenCode) to use this proxy, with easy revert to defaults
 - [**Configurable model mapping**](#model-mapping) — Glob-pattern-based model name rewriting, with sensible defaults for Claude models
+- [**Server-side web search**](#server-side-web-search) — Intercepts `web_search` tool calls and executes them server-side via DuckDuckGo, so models can search the web without client support
+- [**Anthropic built-in tool conversion**](#anthropic-built-in-tools) — Converts Anthropic built-in tool types (`web_search`, `text_editor`, `code_execution`) to standard function tools instead of stripping them
 - **Streaming support** — Full SSE streaming across all three formats, including real-time format translation
 - [**Flexible authentication**](#authentication) — Supports multiple GitHub PATs, environment variables, cached tokens, and interactive device-flow OAuth, with automatic fallback
 - **Multi-worker support** — Spawns multiple worker processes for higher throughput
@@ -253,6 +255,7 @@ POST /v1/embeddings
 
 ```
 POST /v1/messages
+POST /v1/messages/count_tokens
 ```
 
 ### [Gemini](https://ai.google.dev/api)
@@ -480,6 +483,28 @@ export ANTHROPIC_API_KEY=unused
 # Gemini
 export GEMINI_API_BASE=http://127.0.0.1:18080/v1beta
 ```
+
+## Server-side web search
+
+When a model responds with a `web_search` tool call, the adapter intercepts it and executes the search server-side using [DuckDuckGo](https://github.com/deedy5/ddgs) (`ddgs` package). The search results are injected back into the conversation and the model continues generating a response — the client never sees the intermediate tool call.
+
+This enables web search for any model routed through the adapter, even if the client doesn't support executing web search tool calls. It works with both streaming and non-streaming requests.
+
+If the model returns `web_search` alongside other tool calls, the adapter passes all tool calls through to the client instead of intercepting.
+
+**Proxy support:** If `HTTPS_PROXY` or `HTTP_PROXY` environment variables are set, DuckDuckGo searches are routed through the proxy.
+
+## Anthropic built-in tools
+
+Anthropic clients (e.g. Claude Code) may send built-in tool types like `web_search_20250305`, `text_editor_20250124`, and `code_execution_20250522`. The Copilot API doesn't support these type-prefixed tools. The adapter converts them to standard OpenAI function tools:
+
+| Anthropic built-in type | Converted to function tool |
+|------------------------|---------------------------|
+| `web_search_*` | `web_search` (intercepted server-side) |
+| `text_editor_*` | `str_replace_editor` (passed to client) |
+| `code_execution_*` | `code_execution` (passed to client) |
+
+The tool name is preserved from the original request (e.g. if the client sends `name: "str_replace_editor"`, that name is used). Each converted tool includes the full input schema so the model can call it correctly.
 
 ## Available models
 

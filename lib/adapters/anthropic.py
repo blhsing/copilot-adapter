@@ -43,10 +43,6 @@ def _convert_content_blocks(blocks: list, role: str) -> list[dict]:
                 messages.append({"role": role, "content": "\n".join(text_parts)})
                 text_parts = []
                 openai_content_parts = []
-            logger.debug(
-                "Converting tool_use block: id=%s name=%s",
-                block.get("id"), block.get("name"),
-            )
             messages.append({
                 "role": "assistant",
                 "content": None,
@@ -65,10 +61,6 @@ def _convert_content_blocks(blocks: list, role: str) -> list[dict]:
                 messages.append({"role": role, "content": "\n".join(text_parts)})
                 text_parts = []
                 openai_content_parts = []
-            logger.debug(
-                "Converting tool_result block: tool_use_id=%s",
-                block.get("tool_use_id"),
-            )
             tool_content = block.get("content", "")
             if isinstance(tool_content, list):
                 tool_content = "\n".join(
