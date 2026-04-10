@@ -169,6 +169,7 @@ Example `~/.config/copilot-adapter/config.json`:
     "*haiku*": "claude-haiku-4.5"
   },
   "api_tokens": ["sk-abc123...", "sk-def456..."],
+  "web_search_iterations": 3,
   "accounts": [
     {"token": "ghp_aaa", "plan": "enterprise", "quota_limit": 1000, "premium_used": 250},
     {"token": "ghp_bbb", "plan": "free"},
@@ -208,6 +209,7 @@ All CLI options can be set via environment variables:
 | `--proxy-user` | `COPILOT_ADAPTER_PROXY_USER` | *(none)* |
 | `--proxy-password` | `COPILOT_ADAPTER_PROXY_PASSWORD` | *(none)* |
 | `--api-token` | `COPILOT_ADAPTER_API_TOKEN` | stored tokens |
+| `--web-search-iterations` | `COPILOT_ADAPTER_WEB_SEARCH_ITERATIONS` | `3` |
 
 Set `NO_COLOR=1` to disable colored log output. Colors are auto-detected on Windows (requires Windows Terminal or VT-enabled console).
 
@@ -491,6 +493,8 @@ When a model responds with a `web_search` tool call, the adapter intercepts it a
 This enables web search for any model routed through the adapter, even if the client doesn't support executing web search tool calls. It works with both streaming and non-streaming requests.
 
 If the model returns `web_search` alongside other tool calls, the adapter passes all tool calls through to the client instead of intercepting.
+
+The model may call `web_search` multiple times in a single request (e.g. refining its query). The adapter allows up to 3 iterations by default, configurable with `--web-search-iterations N` (or `web_search_iterations` in the config file). Set to 0 to disable server-side interception entirely and pass `web_search` calls through to the client.
 
 **Proxy support:** If `HTTPS_PROXY` or `HTTP_PROXY` environment variables are set, DuckDuckGo searches are routed through the proxy.
 

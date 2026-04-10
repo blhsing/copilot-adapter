@@ -20,6 +20,7 @@ account_mgr: AccountManager | None = None
 _force_free: bool = False
 _model_map: list[tuple[str, str]] = []
 _api_tokens: set[str] | None = None
+_web_search_max_iterations: int = 3
 openai_adapter = OpenAIAdapter()
 anthropic_adapter = AnthropicAdapter()
 
@@ -211,6 +212,7 @@ async def _lifespan(application: FastAPI):
     global _force_free
     global _model_map
     global _api_tokens
+    global _web_search_max_iterations
     tokens_raw = os.environ.get("_COPILOT_ADAPTER_GITHUB_TOKENS", "")
     if tokens_raw and account_mgr is None:
         _force_free = os.environ.get("_COPILOT_ADAPTER_FREE", "") == "1"
@@ -259,6 +261,10 @@ async def _lifespan(application: FastAPI):
         api_tokens_raw = os.environ.get("_COPILOT_ADAPTER_API_TOKENS", "")
         if api_tokens_raw:
             _api_tokens = set(api_tokens_raw.split(","))
+
+        ws_max_raw = os.environ.get("_COPILOT_ADAPTER_WEB_SEARCH_MAX_ITERATIONS", "")
+        if ws_max_raw:
+            _web_search_max_iterations = int(ws_max_raw)
     yield
 
 
@@ -270,12 +276,14 @@ def init_app(
     force_free: bool = False,
     model_map: list[tuple[str, str]] | None = None,
     api_tokens: list[str] | None = None,
+    web_search_max_iterations: int = 1,
 ) -> FastAPI:
-    global account_mgr, _force_free, _model_map, _api_tokens
+    global account_mgr, _force_free, _model_map, _api_tokens, _web_search_max_iterations
     account_mgr = mgr
     _force_free = force_free
     _model_map = model_map if model_map is not None else load_default_model_map()
     _api_tokens = set(api_tokens) if api_tokens else None
+    _web_search_max_iterations = web_search_max_iterations
 
     if cors_origins:
         from fastapi.middleware.cors import CORSMiddleware
@@ -344,11 +352,6 @@ async def handle_chat_completion(
     openai_body["model"] = _apply_model_map(openai_body.get("model", ""))
     requested_model = openai_body.get("model", "")
 
-    # Log tool names if any tools are present
-    tool_names = [t["function"]["name"] for t in openai_body.get("tools", [])]
-    if tool_names:
-        logger.debug("Tools in request: %s", ", ".join(tool_names))
-
     client = await account_mgr.get_client(initiator=resolved)
     account = account_mgr.get_username(client)
 
@@ -364,6 +367,7 @@ async def handle_chat_completion(
 
         async def event_stream():
             nonlocal client, converter, openai_body
+            web_search_iterations = 0
             while True:
                 first_chunk = True
                 needs_retry = False
@@ -442,8 +446,10 @@ async def handle_chat_completion(
                 web_calls = [tc for tc in tool_calls if tc["function"]["name"] == "web_search"]
                 non_web = [tc for tc in tool_calls if tc["function"]["name"] != "web_search"]
 
-                if not web_calls or non_web:
-                    # No web_search, or mixed with other tools — flush through
+                if not web_calls or non_web or web_search_iterations >= _web_search_max_iterations:
+                    # No web_search, mixed with other tools, or max iterations — flush through
+                    if web_search_iterations >= _web_search_max_iterations:
+                        logger.warning("web_search loop limit reached (%d iterations), passing through", web_search_iterations)
                     for bl in buffered_lines:
                         result = converter.feed(bl)
                         if result:
@@ -451,7 +457,8 @@ async def handle_chat_completion(
                     return
 
                 # Pure web_search — execute server-side and continue
-                logger.debug("Intercepting %d web_search call(s)", len(web_calls))
+                web_search_iterations += 1
+                logger.debug("Intercepting %d web_search call(s) (iteration %d/%d)", len(web_calls), web_search_iterations, _web_search_max_iterations)
                 search_results = await _execute_web_search_calls(web_calls)
 
                 assistant_msg = {
@@ -514,9 +521,11 @@ async def handle_chat_completion(
     web_calls = [tc for tc in tool_calls if tc.get("function", {}).get("name") == "web_search"]
     non_web = [tc for tc in tool_calls if tc.get("function", {}).get("name") != "web_search"]
 
-    # Loop: intercept pure web_search calls, re-query until no more
-    while web_calls and not non_web:
-        logger.info("Intercepting %d web_search call(s) (non-streaming)", len(web_calls))
+    # Loop: intercept pure web_search calls, re-query until no more (max _web_search_max_iterations)
+    web_search_iterations = 0
+    while web_calls and not non_web and web_search_iterations < _web_search_max_iterations:
+        web_search_iterations += 1
+        logger.info("Intercepting %d web_search call(s) (non-streaming, iteration %d/%d)", len(web_calls), web_search_iterations, _web_search_max_iterations)
         search_results = await _execute_web_search_calls(tool_calls)
         openai_body["messages"].append({
             "role": "assistant",

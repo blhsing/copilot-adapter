@@ -320,6 +320,10 @@ def config(tool: str, revert: bool, host: str, port: int,
               help="API token for protecting the reverse API proxy (repeatable). "
                    "Env var supports comma-separated values. "
                    "If not specified, loads from stored tokens.")
+@click.option("--web-search-iterations", type=int, default=None, metavar="N",
+              envvar="COPILOT_ADAPTER_WEB_SEARCH_ITERATIONS",
+              help="Max web_search tool call iterations per request (default: 3). "
+                   "Set to 0 to disable server-side web search interception.")
 def serve(config_path: str | None, host: str | None, port: int | None,
           github_token: tuple[str, ...], cors_origin: tuple[str, ...],
           workers: int | None, strategy: str | None,
@@ -327,7 +331,7 @@ def serve(config_path: str | None, host: str | None, port: int | None,
           log_level: str | None, force_free: bool, proxy_mode: bool,
           ca_dir: str | None, model_map_raw: tuple[str, ...],
           proxy_user: str | None, proxy_password: str | None,
-          api_token_raw: tuple[str, ...]):
+          api_token_raw: tuple[str, ...], web_search_iterations: int | None):
     """Start the OpenAI-compatible API server."""
     import uvicorn
 
@@ -371,6 +375,8 @@ def serve(config_path: str | None, host: str | None, port: int | None,
     # --- Proxy auth: CLI/env > config file ---
     proxy_user = proxy_user or cfg.get("proxy_user")
     proxy_password = proxy_password or cfg.get("proxy_password")
+    web_search_iterations = (web_search_iterations if web_search_iterations is not None
+                             else cfg.get("web_search_iterations", 3))
 
     # --- API tokens: CLI/env > config file > stored tokens ---
     api_tokens: list[str] | None = None
@@ -522,6 +528,7 @@ def serve(config_path: str | None, host: str | None, port: int | None,
             )
         if api_tokens:
             os.environ["_COPILOT_ADAPTER_API_TOKENS"] = ",".join(api_tokens)
+        os.environ["_COPILOT_ADAPTER_WEB_SEARCH_MAX_ITERATIONS"] = str(web_search_iterations)
 
         # Custom log config to suppress repetitive per-worker lifespan messages
         from uvicorn.config import LOGGING_CONFIG
@@ -541,7 +548,8 @@ def serve(config_path: str | None, host: str | None, port: int | None,
     else:
         application = init_app(acct_mgr, cors_origins=list(cors_origin) or None,
                                force_free=force_free, model_map=model_map_list,
-                               api_tokens=api_tokens)
+                               api_tokens=api_tokens,
+                               web_search_max_iterations=web_search_iterations)
         if proxy_mode:
             from lib.forward_proxy import DualModeServer
             dual = DualModeServer(
