@@ -419,7 +419,7 @@ async def handle_chat_completion(
                             delta = choice.get("delta", {})
                             if delta.get("tool_calls"):
                                 if not has_tool_calls:
-                                    logger.info("Tool call detected in stream — buffering")
+                                    logger.debug("Tool call detected in stream — buffering")
                                 has_tool_calls = True
                         except (json.JSONDecodeError, IndexError):
                             pass
