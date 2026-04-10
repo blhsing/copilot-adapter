@@ -744,8 +744,7 @@ async def count_tokens(request: Request):
     text_content = json.dumps(body)
     token_count = max(1, len(text_content) // 4)
 
-    logger.info(
-        "count_tokens: model=%s messages=%d tools=%d -> %d tokens",
+    logger.debug(
         model, num_messages, num_tools, token_count,
     )
 

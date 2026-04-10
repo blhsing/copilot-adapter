@@ -479,15 +479,7 @@ def serve(config_path: str | None, host: str | None, port: int | None,
         print(f"\n** API token protection enabled ({len(api_tokens)} token(s)) **")
     if proxy_user and proxy_password:
         print(f"\n** Forward proxy authentication enabled (user: {proxy_user}) **")
-    print(f"\nStarting server on http://{host}:{port}")
-    print(f"  POST /v1/chat/completions                       (OpenAI)")
-    print(f"  POST /v1/responses                              (OpenAI)")
-    print(f"  POST /v1/messages                               (Anthropic)")
-    print(f"  POST /v1beta/models/MODEL:generateContent       (Gemini)")
-    print(f"  POST /v1beta/models/MODEL:streamGenerateContent (Gemini)")
-    print(f"  GET  /v1/models")
-    print(f"  GET  /v1beta/models")
-    print(f"  POST /v1/embeddings\n")
+    print(f"\nStarting server on http://{host}:{port}\n")
 
     # Configure Uvicorn logging format to include timestamps
     from uvicorn.config import LOGGING_CONFIG
