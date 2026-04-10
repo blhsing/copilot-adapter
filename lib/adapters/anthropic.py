@@ -137,44 +137,6 @@ def _anthropic_to_openai(body: dict) -> dict:
                 "required": ["query"],
             },
         },
-        "text_editor": {
-            "description": (
-                "A text editor tool that can view, create, and edit files. "
-                "Commands: view, create, str_replace, insert, undo_edit."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "command": {
-                        "type": "string",
-                        "enum": [
-                            "view", "create", "str_replace",
-                            "insert", "undo_edit",
-                        ],
-                    },
-                    "path": {"type": "string"},
-                    "file_text": {"type": "string"},
-                    "old_str": {"type": "string"},
-                    "new_str": {"type": "string"},
-                    "view_range": {
-                        "type": "array",
-                        "items": {"type": "integer"},
-                    },
-                },
-                "required": ["command", "path"],
-            },
-        },
-        "code_execution": {
-            "description": "Execute code in a sandbox and return the output.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "language": {"type": "string"},
-                    "code": {"type": "string"},
-                },
-                "required": ["code"],
-            },
-        },
     }
 
     if "tools" in body:
@@ -203,6 +165,9 @@ def _anthropic_to_openai(body: dict) -> dict:
                         "parameters": schema["parameters"],
                     },
                 })
+            elif tool_type not in ("", "function", "custom"):
+                # Unsupported Anthropic built-in tool type — strip it
+                logger.info("Stripping unsupported built-in tool type=%s", tool_type)
             else:
                 func_tools.append({
                     "type": "function",
