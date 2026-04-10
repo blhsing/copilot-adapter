@@ -193,7 +193,7 @@ async def _execute_web_search_calls(tool_calls: list[dict]) -> list[dict]:
         except json.JSONDecodeError:
             args = {}
         query = args.get("query", "")
-        logger.info("Executing web_search: query=%r", query)
+        logger.debug("Executing web_search: query=%r", query)
         # ddgs is synchronous — run in a thread to avoid blocking the event loop
         text = await asyncio.to_thread(_do_web_search, query)
         results.append({
@@ -347,7 +347,7 @@ async def handle_chat_completion(
     # Log tool names if any tools are present
     tool_names = [t["function"]["name"] for t in openai_body.get("tools", [])]
     if tool_names:
-        logger.info("Tools in request: %s", ", ".join(tool_names))
+        logger.debug("Tools in request: %s", ", ".join(tool_names))
 
     client = await account_mgr.get_client(initiator=resolved)
     account = account_mgr.get_username(client)
@@ -451,7 +451,7 @@ async def handle_chat_completion(
                     return
 
                 # Pure web_search — execute server-side and continue
-                logger.info("Intercepting %d web_search call(s)", len(web_calls))
+                logger.debug("Intercepting %d web_search call(s)", len(web_calls))
                 search_results = await _execute_web_search_calls(web_calls)
 
                 assistant_msg = {
