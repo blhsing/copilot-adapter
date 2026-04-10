@@ -232,6 +232,8 @@ async def handle_chat_completion(
     is_stream = adapter.is_streaming(body) or openai_body.get("stream")
 
     if is_stream:
+        # Request usage stats in the final streaming chunk
+        openai_body["stream_options"] = {"include_usage": True}
         converter = adapter.create_stream_converter(body)
 
         async def event_stream():
@@ -276,7 +278,8 @@ async def handle_chat_completion(
                                     needs_retry = True
                                     break
                             else:
-                                await account_mgr.record_usage(client, requested_model)
+                                if not _force_free:
+                                    await account_mgr.record_usage(client, requested_model)
 
                     result = converter.feed(line)
                     if result:
@@ -323,7 +326,8 @@ async def handle_chat_completion(
                 continue
         break
 
-    await account_mgr.record_usage(client, requested_model)
+    if not _force_free:
+        await account_mgr.record_usage(client, requested_model)
     return JSONResponse(
         content=adapter.convert_chat_response(resp_data, body),
         status_code=resp.status_code,
@@ -416,7 +420,8 @@ async def responses(request: Request):
                                     needs_retry = True
                                     break
                             else:
-                                await account_mgr.record_usage(client, requested_model)
+                                if not _force_free:
+                                    await account_mgr.record_usage(client, requested_model)
                     result = converter.feed(line)
                     if result:
                         yield result
@@ -459,7 +464,8 @@ async def responses(request: Request):
                 client = fallback
                 continue
         break
-    await account_mgr.record_usage(client, requested_model)
+    if not _force_free:
+        await account_mgr.record_usage(client, requested_model)
     return JSONResponse(content=resp_data, status_code=resp.status_code)
 
 
@@ -594,6 +600,7 @@ async def gemini_stream_generate_content(model_id: str, request: Request):
     billed_status = "yes" if resolved == "user" else "no"
     logger.info("Chat completion requested by %s (billed: %s, model: %s, account: %s)", resolved, billed_status, requested_model, account)
 
+    openai_body["stream_options"] = {"include_usage": True}
     converter = adapter.create_stream_converter(body)
 
     async def event_stream():
@@ -635,7 +642,8 @@ async def gemini_stream_generate_content(model_id: str, request: Request):
                                 needs_retry = True
                                 break
                         else:
-                            await account_mgr.record_usage(client, requested_model)
+                            if not _force_free:
+                                await account_mgr.record_usage(client, requested_model)
                 result = converter.feed(line)
                 if result:
                     yield result
