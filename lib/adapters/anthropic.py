@@ -43,6 +43,10 @@ def _convert_content_blocks(blocks: list, role: str) -> list[dict]:
                 messages.append({"role": role, "content": "\n".join(text_parts)})
                 text_parts = []
                 openai_content_parts = []
+            logger.debug(
+                "Converting tool_use block: id=%s name=%s",
+                block.get("id"), block.get("name"),
+            )
             messages.append({
                 "role": "assistant",
                 "content": None,
@@ -61,6 +65,10 @@ def _convert_content_blocks(blocks: list, role: str) -> list[dict]:
                 messages.append({"role": role, "content": "\n".join(text_parts)})
                 text_parts = []
                 openai_content_parts = []
+            logger.debug(
+                "Converting tool_result block: tool_use_id=%s",
+                block.get("tool_use_id"),
+            )
             tool_content = block.get("content", "")
             if isinstance(tool_content, list):
                 tool_content = "\n".join(
@@ -120,32 +128,104 @@ def _anthropic_to_openai(body: dict) -> dict:
     if "stop_sequences" in body:
         result["stop"] = body["stop_sequences"]
 
-    # Anthropic built-in tool types that cannot be translated to OpenAI
-    # function tools (they are server-side features, not callable functions).
-    _BUILTIN_TOOL_PREFIXES = ("web_search", "text_editor", "code_execution")
+    # Anthropic built-in tool types — converted to OpenAI function tools.
+    # These are passed through as regular function tools for the client to
+    # handle (web_search, text_editor, code_execution).
+    _BUILTIN_TOOL_SCHEMAS = {
+        "web_search": {
+            "description": "Search the web for information.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The search query.",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+        "text_editor": {
+            "description": (
+                "A text editor tool that can view, create, and edit files. "
+                "Commands: view, create, str_replace, insert, undo_edit."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "enum": [
+                            "view", "create", "str_replace",
+                            "insert", "undo_edit",
+                        ],
+                    },
+                    "path": {"type": "string"},
+                    "file_text": {"type": "string"},
+                    "old_str": {"type": "string"},
+                    "new_str": {"type": "string"},
+                    "view_range": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                    },
+                },
+                "required": ["command", "path"],
+            },
+        },
+        "code_execution": {
+            "description": "Execute code in a sandbox and return the output.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "language": {"type": "string"},
+                    "code": {"type": "string"},
+                },
+                "required": ["code"],
+            },
+        },
+    }
 
     if "tools" in body:
         func_tools = []
         for t in body["tools"]:
             tool_type = t.get("type", "")
-            # Skip Anthropic built-in tools
-            if any(tool_type.startswith(p) for p in _BUILTIN_TOOL_PREFIXES):
-                continue
-            func_tools.append({
-                "type": "function",
-                "function": {
-                    "name": t["name"],
-                    "description": t.get("description", ""),
-                    "parameters": t.get("input_schema", {}),
-                },
-            })
+            # Check for Anthropic built-in tools by type prefix
+            builtin_key = None
+            for prefix in _BUILTIN_TOOL_SCHEMAS:
+                if tool_type.startswith(prefix):
+                    builtin_key = prefix
+                    break
+            if builtin_key:
+                schema = _BUILTIN_TOOL_SCHEMAS[builtin_key]
+                tool_name = t.get("name", builtin_key)
+                logger.info(
+                    "Converting Anthropic built-in tool type=%s -> "
+                    "function tool name=%s",
+                    tool_type, tool_name,
+                )
+                func_tools.append({
+                    "type": "function",
+                    "function": {
+                        "name": tool_name,
+                        "description": schema["description"],
+                        "parameters": schema["parameters"],
+                    },
+                })
+            else:
+                func_tools.append({
+                    "type": "function",
+                    "function": {
+                        "name": t["name"],
+                        "description": t.get("description", ""),
+                        "parameters": t.get("input_schema", {}),
+                    },
+                })
         if func_tools:
             result["tools"] = func_tools
 
     tc = body.get("tool_choice")
     if tc:
         tc_type = tc.get("type") if isinstance(tc, dict) else tc
-        # If tool_choice references a specific tool that was stripped, fall back
         if tc_type == "tool":
             forced_name = tc.get("name", "")
             has_tool = any(
@@ -157,7 +237,7 @@ def _anthropic_to_openai(body: dict) -> dict:
                     "type": "function",
                     "function": {"name": forced_name},
                 }
-            # else: tool was stripped, omit tool_choice entirely
+            # else: tool not found, omit tool_choice
         elif tc_type == "auto":
             result["tool_choice"] = "auto"
         elif tc_type == "any":
@@ -196,10 +276,16 @@ def _openai_to_anthropic(openai_resp: dict, model: str) -> dict:
             input_obj = json.loads(func.get("arguments", "{}"))
         except json.JSONDecodeError:
             input_obj = {}
+        tool_id = tc.get("id", f"toolu_{uuid.uuid4().hex[:24]}")
+        tool_name = func.get("name", "")
+        logger.info(
+            "Response contains tool_use: id=%s name=%s",
+            tool_id, tool_name,
+        )
         content.append({
             "type": "tool_use",
-            "id": tc.get("id", f"toolu_{uuid.uuid4().hex[:24]}"),
-            "name": func.get("name", ""),
+            "id": tool_id,
+            "name": tool_name,
             "input": input_obj,
         })
 
