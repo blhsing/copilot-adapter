@@ -465,7 +465,7 @@ Supported tools:
 | `gemini-cli` | `~/.gemini/settings.json` | `baseUrl` and `apiKey` fields |
 | `opencode` | `~/.config/opencode/opencode.json` | `copilot-adapter` provider block |
 
-A `.bak` backup is created before modifying any config file. When reverting, the backup is restored if it exists; otherwise the added keys are removed.
+A `.copilot-adapter.bak` backup is created before modifying any config file. When reverting, the backup is restored if it exists; otherwise the added keys are removed.
 
 If `--api-token` is not specified, the first stored API token (from `tokens --generate`) is used automatically, if any.
 

@@ -9,18 +9,18 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 
 def _backup_file(path: Path) -> Path | None:
-    """Copy *path* to *path*.bak.  Returns the backup path, or None."""
+    """Copy *path* to *path*.copilot-adapter.bak.  Returns the backup path, or None."""
     if not path.exists():
         return None
-    bak = path.with_suffix(path.suffix + ".bak")
+    bak = path.with_suffix(path.suffix + ".copilot-adapter.bak")
     shutil.copy2(path, bak)
     print(f"Backed up {path} -> {bak}")
     return bak
 
 
 def _restore_backup(path: Path) -> bool:
-    """Restore *path* from its .bak file.  Returns True on success."""
-    bak = path.with_suffix(path.suffix + ".bak")
+    """Restore *path* from its .copilot-adapter.bak file.  Returns True on success."""
+    bak = path.with_suffix(path.suffix + ".copilot-adapter.bak")
     if not bak.exists():
         return False
     shutil.copy2(bak, path)
