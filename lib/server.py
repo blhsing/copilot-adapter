@@ -368,6 +368,14 @@ async def handle_chat_completion(
         async def event_stream():
             nonlocal client, converter, openai_body
             web_search_iterations = 0
+            # Only buffer for web_search interception if web_search is in the tools
+            should_intercept_web_search = (
+                _web_search_max_iterations > 0
+                and any(
+                    t.get("function", {}).get("name") == "web_search"
+                    for t in openai_body.get("tools", [])
+                )
+            )
             while True:
                 first_chunk = True
                 needs_retry = False
@@ -414,19 +422,20 @@ async def handle_chat_completion(
                                 if not _force_free:
                                     await account_mgr.record_usage(client, requested_model)
 
-                    # Detect tool calls — buffer if found for web_search interception
-                    stripped = line.strip()
-                    if stripped.startswith("data: ") and stripped[6:].strip() != "[DONE]":
-                        try:
-                            chunk = json.loads(stripped[6:])
-                            choice = (chunk.get("choices") or [{}])[0]
-                            delta = choice.get("delta", {})
-                            if delta.get("tool_calls"):
-                                if not has_tool_calls:
-                                    logger.debug("Tool call detected in stream — buffering")
-                                has_tool_calls = True
-                        except (json.JSONDecodeError, IndexError):
-                            pass
+                    # Only buffer when we might need to intercept web_search
+                    if should_intercept_web_search:
+                        stripped = line.strip()
+                        if stripped.startswith("data: ") and stripped[6:].strip() != "[DONE]":
+                            try:
+                                chunk = json.loads(stripped[6:])
+                                choice = (chunk.get("choices") or [{}])[0]
+                                delta = choice.get("delta", {})
+                                if delta.get("tool_calls"):
+                                    if not has_tool_calls:
+                                        logger.debug("Tool call detected in stream — buffering for web_search check")
+                                    has_tool_calls = True
+                            except (json.JSONDecodeError, IndexError):
+                                pass
 
                     if has_tool_calls:
                         buffered_lines.append(line)
@@ -442,7 +451,19 @@ async def handle_chat_completion(
                     return
 
                 # Check buffered tool calls for web_search
+                logger.debug(
+                    "Stream ended with %d buffered lines, extracting tool calls",
+                    len(buffered_lines),
+                )
                 tool_calls = _extract_tool_calls_from_stream(buffered_lines)
+                if not tool_calls:
+                    logger.debug("No tool calls extracted from buffer — flushing %d lines through", len(buffered_lines))
+                    for bl in buffered_lines:
+                        result = converter.feed(bl)
+                        if result:
+                            yield result
+                    return
+
                 web_calls = [tc for tc in tool_calls if tc["function"]["name"] == "web_search"]
                 non_web = [tc for tc in tool_calls if tc["function"]["name"] != "web_search"]
 
@@ -450,6 +471,10 @@ async def handle_chat_completion(
                     # No web_search, mixed with other tools, or max iterations — flush through
                     if web_search_iterations >= _web_search_max_iterations:
                         logger.warning("web_search loop limit reached (%d iterations), passing through", web_search_iterations)
+                    logger.debug(
+                        "Flushing %d buffered lines (web=%d, non_web=%d)",
+                        len(buffered_lines), len(web_calls), len(non_web),
+                    )
                     for bl in buffered_lines:
                         result = converter.feed(bl)
                         if result:
