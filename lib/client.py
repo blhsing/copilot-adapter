@@ -61,8 +61,11 @@ class CopilotClient:
                     text = await response.aread()
                     yield f"error: {response.status_code} {text.decode()}"
                     return
-                async for line in response.aiter_lines():
-                    yield line
+                try:
+                    async for line in response.aiter_lines():
+                        yield line
+                except httpx.RemoteProtocolError as e:
+                    yield f"error: 502 {e}"
 
     async def responses(
         self, body: dict, *, initiator: str = "user"
@@ -89,8 +92,11 @@ class CopilotClient:
                     text = await response.aread()
                     yield f"error: {response.status_code} {text.decode()}"
                     return
-                async for line in response.aiter_lines():
-                    yield line
+                try:
+                    async for line in response.aiter_lines():
+                        yield line
+                except httpx.RemoteProtocolError as e:
+                    yield f"error: 502 {e}"
 
     async def list_models(self) -> httpx.Response:
         async with httpx.AsyncClient(timeout=30) as client:
