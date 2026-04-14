@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import random
+import time
 from dataclasses import dataclass, field
 
 from lib.auth import CopilotTokenManager, update_account
@@ -91,6 +92,7 @@ class AccountInfo:
     premium_used: float = 0
     premium_limit: int | None = None  # None = unknown
     exhausted: bool = False
+    last_request_time: float | None = None
 
 
 class AccountManager:
@@ -209,6 +211,27 @@ class AccountManager:
                     break
         if username is not None:
             update_account(username, premium_used=usage)
+
+    async def record_request_time(self, client: CopilotClient) -> None:
+        """Record the current time as the last request time for *client*'s account."""
+        async with self._lock:
+            for acct in self._accounts:
+                if acct.client is client:
+                    acct.last_request_time = time.time()
+                    break
+
+    async def get_minutes_since_last_request(self, client: CopilotClient) -> float | None:
+        """Return minutes elapsed since the last request on *client*'s account.
+
+        Returns ``None`` if no prior request has been recorded.
+        """
+        async with self._lock:
+            for acct in self._accounts:
+                if acct.client is client:
+                    if acct.last_request_time is None:
+                        return None
+                    return (time.time() - acct.last_request_time) / 60.0
+        return None
 
     async def mark_exhausted(self, client: CopilotClient) -> None:
         """Mark the account associated with *client* as exhausted."""

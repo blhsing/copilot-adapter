@@ -295,6 +295,10 @@ def config(tool: str, revert: bool, host: str, port: int,
 @click.option("--free", "force_free", is_flag=True, default=False,
               envvar="COPILOT_ADAPTER_FREE",
               help="Mark all requests as agent-initiated so nothing counts as a premium request.")
+@click.option("--free-within-minutes", type=float, default=None, metavar="N",
+              envvar="COPILOT_ADAPTER_FREE_WITHIN_MINUTES",
+              help="Mark user requests as agent-initiated if the last request "
+                   "was less than N minutes ago. Mutually exclusive with --free.")
 @click.option("--proxy", "proxy_mode", is_flag=True, default=False,
               envvar="COPILOT_ADAPTER_PROXY",
               help="Enable forward proxy mode on the same port. CONNECT requests to "
@@ -328,7 +332,9 @@ def serve(config_path: str | None, host: str | None, port: int | None,
           github_token: tuple[str, ...], cors_origin: tuple[str, ...],
           workers: int | None, strategy: str | None,
           quota_limit: int | None, plan: str | None,
-          log_level: str | None, force_free: bool, proxy_mode: bool,
+          log_level: str | None, force_free: bool,
+          free_within_minutes: float | None,
+          proxy_mode: bool,
           ca_dir: str | None, model_map_raw: tuple[str, ...],
           proxy_user: str | None, proxy_password: str | None,
           api_token_raw: tuple[str, ...], web_search_iterations: int | None):
@@ -351,6 +357,10 @@ def serve(config_path: str | None, host: str | None, port: int | None,
     plan = plan or cfg.get("plan", "pro")
     log_level = log_level or cfg.get("log_level", "info")
     force_free = force_free or cfg.get("free", False)
+    free_within_minutes = (free_within_minutes if free_within_minutes is not None
+                           else cfg.get("free_within_minutes"))
+    if force_free and free_within_minutes is not None:
+        raise click.UsageError("--free and --free-within-minutes are mutually exclusive.")
     proxy_mode = proxy_mode or cfg.get("proxy", False)
     ca_dir = Path(ca_dir) if ca_dir else cfg.get("ca_dir")
     if isinstance(ca_dir, str):
@@ -475,6 +485,8 @@ def serve(config_path: str | None, host: str | None, port: int | None,
         print(f"  - {acct.username} (plan: {acct.plan}, usage: {acct.premium_used}/{limit_str})")
     if force_free:
         print("\n** Free mode enabled: all requests will be marked as agent-initiated **")
+    if free_within_minutes is not None:
+        print(f"\n** Time-based free mode: requests within {free_within_minutes} min of last → agent **")
     if api_tokens:
         print(f"\n** API token protection enabled ({len(api_tokens)} token(s)) **")
     if proxy_user and proxy_password:
@@ -514,6 +526,8 @@ def serve(config_path: str | None, host: str | None, port: int | None,
             os.environ["_COPILOT_ADAPTER_CORS_ORIGINS"] = ",".join(cors_origin)
         if force_free:
             os.environ["_COPILOT_ADAPTER_FREE"] = "1"
+        if free_within_minutes is not None:
+            os.environ["_COPILOT_ADAPTER_FREE_WITHIN_MINUTES"] = str(free_within_minutes)
         if model_map_list is not None:
             os.environ["_COPILOT_ADAPTER_MODEL_MAP"] = ",".join(
                 f"{p}={t}" for p, t in model_map_list
@@ -539,7 +553,9 @@ def serve(config_path: str | None, host: str | None, port: int | None,
         )
     else:
         application = init_app(acct_mgr, cors_origins=list(cors_origin) or None,
-                               force_free=force_free, model_map=model_map_list,
+                               force_free=force_free,
+                               free_within_minutes=free_within_minutes,
+                               model_map=model_map_list,
                                api_tokens=api_tokens,
                                web_search_max_iterations=web_search_iterations)
         if proxy_mode:
