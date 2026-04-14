@@ -157,6 +157,7 @@ Example `~/.config/copilot-adapter/config.json`:
   "strategy": "max-usage",
   "plan": "pro",
   "free": false,
+  "free_within_minutes": 5,
   "proxy": false,
   "proxy_user": "myuser",
   "proxy_password": "mypassword",
@@ -202,6 +203,7 @@ All CLI options can be set via environment variables:
 | `--plan` | `COPILOT_ADAPTER_PLAN` | `pro` |
 | `--log-level` | `COPILOT_ADAPTER_LOG_LEVEL` | `info` |
 | `--free` | `COPILOT_ADAPTER_FREE` | *(off)* |
+| `--free-within-minutes` | `COPILOT_ADAPTER_FREE_WITHIN_MINUTES` | *(off)* |
 | `--proxy` | `COPILOT_ADAPTER_PROXY` | *(off)* |
 | `--ca-dir` | `COPILOT_ADAPTER_CA_DIR` | `~/.config/copilot-adapter` |
 | `--model-map` | `COPILOT_ADAPTER_MODEL_MAP` | shipped `model_map.json` |
@@ -297,6 +299,18 @@ python copilot_adapter.py serve --free
 ```
 
 This is useful when you want to avoid all premium billing regardless of request type. Note that GitHub Copilot may throttle or deprioritize agent-initiated requests compared to user-initiated ones.
+
+### Time-based free mode
+
+Use `--free-within-minutes N` to mark a user-initiated request as agent-initiated only if the last request to the same account was less than N minutes ago:
+
+```bash
+python copilot_adapter.py serve --free-within-minutes 5
+```
+
+The logic: the first request in a session is billed normally (as `user`), but subsequent requests within the time window are marked as `agent` (free). Once the account has been idle for longer than N minutes, the next request is treated as a new session and billed normally again.
+
+This is useful when you want to limit premium billing to one request per session rather than eliminating it entirely. It's mutually exclusive with `--free`.
 
 When using multi-account rotation, agent-initiated requests always stay on the same account as the preceding user request to avoid billing a premium request on a different account.
 

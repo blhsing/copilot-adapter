@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 account_mgr: AccountManager | None = None
 _force_free: bool = False
+_free_within_minutes: float | None = None
 _model_map: list[tuple[str, str]] = []
 _api_tokens: set[str] | None = None
 _web_search_max_iterations: int = 3
@@ -210,12 +211,15 @@ async def _lifespan(application: FastAPI):
     """Initialize the AccountManager in each worker process on startup."""
     global account_mgr
     global _force_free
+    global _free_within_minutes
     global _model_map
     global _api_tokens
     global _web_search_max_iterations
     tokens_raw = os.environ.get("_COPILOT_ADAPTER_GITHUB_TOKENS", "")
     if tokens_raw and account_mgr is None:
         _force_free = os.environ.get("_COPILOT_ADAPTER_FREE", "") == "1"
+        fwm_raw = os.environ.get("_COPILOT_ADAPTER_FREE_WITHIN_MINUTES", "")
+        _free_within_minutes = float(fwm_raw) if fwm_raw else None
         # Format: "token1:username1:plan1:quota1:usage1,..."
         strategy = os.environ.get("_COPILOT_ADAPTER_STRATEGY", "max-usage")
         quota_limit_raw = os.environ.get("_COPILOT_ADAPTER_QUOTA_LIMIT", "")
@@ -274,13 +278,15 @@ app = FastAPI(title="Copilot API", version="0.1.0", lifespan=_lifespan)
 def init_app(
     mgr: AccountManager, cors_origins: list[str] | None = None,
     force_free: bool = False,
+    free_within_minutes: float | None = None,
     model_map: list[tuple[str, str]] | None = None,
     api_tokens: list[str] | None = None,
     web_search_max_iterations: int = 1,
 ) -> FastAPI:
-    global account_mgr, _force_free, _model_map, _api_tokens, _web_search_max_iterations
+    global account_mgr, _force_free, _free_within_minutes, _model_map, _api_tokens, _web_search_max_iterations
     account_mgr = mgr
     _force_free = force_free
+    _free_within_minutes = free_within_minutes
     _model_map = model_map if model_map is not None else load_default_model_map()
     _api_tokens = set(api_tokens) if api_tokens else None
     _web_search_max_iterations = web_search_max_iterations
@@ -353,6 +359,15 @@ async def handle_chat_completion(
     requested_model = openai_body.get("model", "")
 
     client = await account_mgr.get_client(initiator=resolved)
+
+    # Time-based free override: if the last request was within N minutes, mark as agent
+    if _free_within_minutes is not None and resolved == "user":
+        elapsed = await account_mgr.get_minutes_since_last_request(client)
+        if elapsed is not None and elapsed < _free_within_minutes:
+            resolved = "agent"
+            logger.info("free-within-minutes: last request %.1f min ago < %.1f → agent",
+                        elapsed, _free_within_minutes)
+
     account = account_mgr.get_username(client)
 
     billed_status = "yes" if resolved == "user" else "no"
@@ -419,8 +434,9 @@ async def handle_chat_completion(
                                     needs_retry = True
                                     break
                             else:
-                                if not _force_free:
+                                if not _force_free and resolved == "user":
                                     await account_mgr.record_usage(client, requested_model)
+                                await account_mgr.record_request_time(client)
 
                     # Only buffer when we might need to intercept web_search
                     if should_intercept_web_search:
@@ -536,8 +552,9 @@ async def handle_chat_completion(
                 continue
         break
 
-    if not _force_free:
+    if not _force_free and resolved == "user":
         await account_mgr.record_usage(client, requested_model)
+    await account_mgr.record_request_time(client)
 
     # Check for web_search in non-streaming response
     choice = (resp_data.get("choices") or [{}])[0]
@@ -623,6 +640,15 @@ async def responses(request: Request):
     requested_model = body.get("model", "")
 
     client = await account_mgr.get_client(initiator=initiator)
+
+    # Time-based free override
+    if _free_within_minutes is not None and initiator == "user":
+        elapsed = await account_mgr.get_minutes_since_last_request(client)
+        if elapsed is not None and elapsed < _free_within_minutes:
+            initiator = "agent"
+            logger.info("free-within-minutes: last request %.1f min ago < %.1f → agent",
+                        elapsed, _free_within_minutes)
+
     account = account_mgr.get_username(client)
 
     billed_status = "yes" if initiator == "user" else "no"
@@ -668,8 +694,9 @@ async def responses(request: Request):
                                     needs_retry = True
                                     break
                             else:
-                                if not _force_free:
+                                if not _force_free and initiator == "user":
                                     await account_mgr.record_usage(client, requested_model)
+                                await account_mgr.record_request_time(client)
                     result = converter.feed(line)
                     if result:
                         yield result
@@ -712,8 +739,9 @@ async def responses(request: Request):
                 client = fallback
                 continue
         break
-    if not _force_free:
+    if not _force_free and initiator == "user":
         await account_mgr.record_usage(client, requested_model)
+    await account_mgr.record_request_time(client)
     return JSONResponse(content=resp_data, status_code=resp.status_code)
 
 
@@ -852,6 +880,15 @@ async def gemini_stream_generate_content(model_id: str, request: Request):
     openai_body["stream"] = True
     requested_model = openai_body.get("model", "")
     client = await account_mgr.get_client(initiator=resolved)
+
+    # Time-based free override
+    if _free_within_minutes is not None and resolved == "user":
+        elapsed = await account_mgr.get_minutes_since_last_request(client)
+        if elapsed is not None and elapsed < _free_within_minutes:
+            resolved = "agent"
+            logger.info("free-within-minutes: last request %.1f min ago < %.1f → agent",
+                        elapsed, _free_within_minutes)
+
     account = account_mgr.get_username(client)
 
     billed_status = "yes" if resolved == "user" else "no"
@@ -899,8 +936,9 @@ async def gemini_stream_generate_content(model_id: str, request: Request):
                                 needs_retry = True
                                 break
                         else:
-                            if not _force_free:
+                            if not _force_free and resolved == "user":
                                 await account_mgr.record_usage(client, requested_model)
+                            await account_mgr.record_request_time(client)
                 result = converter.feed(line)
                 if result:
                     yield result
