@@ -66,6 +66,8 @@ class CopilotClient:
                         yield line
                 except httpx.RemoteProtocolError as e:
                     yield f"error: 502 {e}"
+                except httpx.ReadTimeout as e:
+                    yield f"error: 504 {e}"
 
     async def responses(
         self, body: dict, *, initiator: str = "user"
@@ -97,6 +99,8 @@ class CopilotClient:
                         yield line
                 except httpx.RemoteProtocolError as e:
                     yield f"error: 502 {e}"
+                except httpx.ReadTimeout as e:
+                    yield f"error: 504 {e}"
 
     async def list_models(self) -> httpx.Response:
         async with httpx.AsyncClient(timeout=30) as client:
