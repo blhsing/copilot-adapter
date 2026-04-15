@@ -18,6 +18,7 @@ def _convert_content_blocks(blocks: list, role: str) -> list[dict]:
     text_parts = []
     openai_content_parts = []
     has_multimodal = False
+    pending_tool_calls = []
 
     for block in blocks:
         btype = block.get("type")
@@ -39,25 +40,28 @@ def _convert_content_blocks(blocks: list, role: str) -> list[dict]:
             })
 
         elif btype == "tool_use":
-            if text_parts:
-                messages.append({"role": role, "content": "\n".join(text_parts)})
-                text_parts = []
-                openai_content_parts = []
-            messages.append({
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [{
-                    "id": block["id"],
-                    "type": "function",
-                    "function": {
-                        "name": block["name"],
-                        "arguments": json.dumps(block["input"]),
-                    },
-                }],
+            pending_tool_calls.append({
+                "id": block["id"],
+                "type": "function",
+                "function": {
+                    "name": block["name"],
+                    "arguments": json.dumps(block["input"]),
+                },
             })
 
         elif btype == "tool_result":
-            if text_parts:
+            # Flush pending tool calls before tool results
+            if pending_tool_calls:
+                content_text = "\n".join(text_parts) if text_parts else None
+                messages.append({
+                    "role": "assistant",
+                    "content": content_text,
+                    "tool_calls": pending_tool_calls,
+                })
+                text_parts = []
+                openai_content_parts = []
+                pending_tool_calls = []
+            elif text_parts:
                 messages.append({"role": role, "content": "\n".join(text_parts)})
                 text_parts = []
                 openai_content_parts = []
@@ -72,7 +76,15 @@ def _convert_content_blocks(blocks: list, role: str) -> list[dict]:
                 "content": str(tool_content),
             })
 
-    if openai_content_parts:
+    # Flush remaining content
+    if pending_tool_calls:
+        content_text = "\n".join(text_parts) if text_parts else None
+        messages.append({
+            "role": "assistant",
+            "content": content_text,
+            "tool_calls": pending_tool_calls,
+        })
+    elif openai_content_parts:
         if has_multimodal:
             messages.append({"role": role, "content": openai_content_parts})
         elif text_parts:
