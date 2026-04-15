@@ -292,6 +292,9 @@ def config(tool: str, revert: bool, host: str, port: int,
               type=click.Choice(["debug", "info", "warning", "error"], case_sensitive=False),
               envvar="COPILOT_ADAPTER_LOG_LEVEL",
               help="Logging level (default: info). Use 'debug' for verbose output.")
+@click.option("--log-file", default=None, metavar="PATH",
+              envvar="COPILOT_ADAPTER_LOG_FILE",
+              help="Append logs to PATH in addition to the console.")
 @click.option("--free", "force_free", is_flag=True, default=False,
               envvar="COPILOT_ADAPTER_FREE",
               help="Mark all requests as agent-initiated so nothing counts as a premium request.")
@@ -332,7 +335,7 @@ def serve(config_path: str | None, host: str | None, port: int | None,
           github_token: tuple[str, ...], cors_origin: tuple[str, ...],
           workers: int | None, strategy: str | None,
           quota_limit: int | None, plan: str | None,
-          log_level: str | None, force_free: bool,
+          log_level: str | None, log_file: str | None, force_free: bool,
           free_within_minutes: float | None,
           proxy_mode: bool,
           ca_dir: str | None, model_map_raw: tuple[str, ...],
@@ -344,6 +347,7 @@ def serve(config_path: str | None, host: str | None, port: int | None,
     from lib.account_manager import AccountManager
     from lib.auth import get_cached_account_meta, resolve_github_tokens
     from lib.server import init_app
+    from lib.logging import build_runtime_logging_config
 
     # --- Load config file (lowest precedence) ---
     cfg = _load_config(config_path)
@@ -356,6 +360,7 @@ def serve(config_path: str | None, host: str | None, port: int | None,
     quota_limit = quota_limit if quota_limit is not None else cfg.get("quota_limit")
     plan = plan or cfg.get("plan", "pro")
     log_level = log_level or cfg.get("log_level", "info")
+    log_file = log_file or cfg.get("log_file")
     force_free = force_free or cfg.get("free", False)
     free_within_minutes = (free_within_minutes if free_within_minutes is not None
                            else cfg.get("free_within_minutes"))
@@ -493,17 +498,8 @@ def serve(config_path: str | None, host: str | None, port: int | None,
         print(f"\n** Forward proxy authentication enabled (user: {proxy_user}) **")
     print(f"\nStarting server on http://{host}:{port}\n")
 
-    # Configure Uvicorn logging format to include timestamps
     from uvicorn.config import LOGGING_CONFIG
-    LOGGING_CONFIG["formatters"]["default"]["fmt"] = "%(asctime)s - %(levelprefix)s %(message)s"
-    LOGGING_CONFIG["formatters"]["access"]["fmt"] = '%(asctime)s - %(levelprefix)s %(client_addr)s - "%(request_line)s" %(status_code)s'
-
-    # Route 'lib' logger to Uvicorn's default handler so logger.info works
-    LOGGING_CONFIG["loggers"]["lib"] = {
-        "handlers": ["default"],
-        "level": log_level.upper(),
-        "propagate": False
-    }
+    logging_config = build_runtime_logging_config(LOGGING_CONFIG, log_level, log_file)
 
     if proxy_mode and workers > 1:
         print("Warning: --proxy mode is not compatible with multiple workers, using 1 worker")
@@ -534,22 +530,16 @@ def serve(config_path: str | None, host: str | None, port: int | None,
             )
         if api_tokens:
             os.environ["_COPILOT_ADAPTER_API_TOKENS"] = ",".join(api_tokens)
+        if log_file:
+            os.environ["_COPILOT_ADAPTER_LOG_FILE"] = log_file
         os.environ["_COPILOT_ADAPTER_WEB_SEARCH_MAX_ITERATIONS"] = str(web_search_iterations)
-
-        # Custom log config to suppress repetitive per-worker lifespan messages
-        from uvicorn.config import LOGGING_CONFIG
-        LOGGING_CONFIG["filters"] = {
-            "no_lifespan": {"()": "lib.logging.LifespanFilter"},
-        }
-        LOGGING_CONFIG["handlers"]["default"].setdefault("filters", [])
-        if "no_lifespan" not in LOGGING_CONFIG["handlers"]["default"]["filters"]:
-            LOGGING_CONFIG["handlers"]["default"]["filters"].append("no_lifespan")
 
         uvicorn.run(
             "lib.server:app", host=host, port=port,
             workers=workers, log_level=log_level,
             timeout_graceful_shutdown=5,
             use_colors=_supports_color(),
+            log_config=logging_config,
         )
     else:
         application = init_app(acct_mgr, cors_origins=list(cors_origin) or None,
@@ -566,6 +556,7 @@ def serve(config_path: str | None, host: str | None, port: int | None,
                 proxy_user=proxy_user,
                 proxy_password=proxy_password,
                 uvicorn_log_level=log_level,
+                uvicorn_log_config=logging_config,
                 uvicorn_use_colors=_supports_color(),
                 timeout_graceful_shutdown=5,
             )
@@ -573,7 +564,8 @@ def serve(config_path: str | None, host: str | None, port: int | None,
         else:
             uvicorn.run(application, host=host, port=port, log_level=log_level,
                         timeout_graceful_shutdown=5,
-                        use_colors=_supports_color())
+                        use_colors=_supports_color(),
+                        log_config=logging_config)
 
 
 if __name__ == "__main__":
