@@ -14,6 +14,11 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .adapters import AnthropicAdapter, FormatAdapter, GeminiAdapter, OpenAIAdapter
+from .adapters.anthropic import (
+    _anthropic_to_responses,
+    _AnthropicResponsesStreamConverter,
+    _responses_to_anthropic,
+)
 from .account_manager import AccountManager
 
 logger = logging.getLogger(__name__)
@@ -93,6 +98,15 @@ def _should_use_native_anthropic_api(source_provider: str, target_model: str) ->
     )
 
 
+def _should_use_responses_api(target_model: str) -> bool:
+    """Return True when the target model requires the Responses API.
+
+    Some models (e.g. gpt-5.4) reject reasoning_effort + function tools
+    on ``/v1/chat/completions`` and require ``/v1/responses`` instead.
+    """
+    return target_model in ("gpt-5.4",)
+
+
 def _anthropic_has_interceptable_web_search(body: dict) -> bool:
     """Return True when an Anthropic request uses built-in web_search."""
     if _web_search_max_iterations <= 0:
@@ -165,11 +179,6 @@ def _normalize_reasoning_params(openai_body: dict, source_provider: str, target_
         )
         if effort and target_provider == "openai":
             openai_body["reasoning_effort"] = effort
-            logger.debug(
-                "Reasoning normalization applied: target=%s reasoning_effort=%s",
-                target_model,
-                effort,
-            )
         elif (thinking or output_effort) and not effort:
             logger.debug(
                 "Reasoning normalization skipped: inputs did not map to effort (thinking=%s, output_effort=%s)",
@@ -326,6 +335,76 @@ def _extract_text_from_stream(lines: list[str]) -> str:
         except (json.JSONDecodeError, IndexError):
             pass
     return "".join(parts)
+
+
+def _extract_tool_calls_from_responses_stream(lines: list[str]) -> list[dict]:
+    """Extract completed function_call items from buffered Responses API SSE lines."""
+    tool_calls: list[dict] = []
+    for raw_line in lines:
+        stripped = raw_line.strip()
+        if not stripped.startswith("data: "):
+            continue
+        payload = stripped[6:].strip()
+        if payload == "[DONE]":
+            continue
+        try:
+            data = json.loads(payload)
+        except json.JSONDecodeError:
+            continue
+        if data.get("type") != "response.output_item.done":
+            continue
+        item = data.get("item", {})
+        if item.get("type") != "function_call":
+            continue
+        tool_calls.append({
+            "call_id": item.get("call_id", ""),
+            "name": item.get("name", ""),
+            "arguments": item.get("arguments", ""),
+        })
+    if tool_calls:
+        logger.info(
+            "Extracted %d function_call(s) from responses stream: %s",
+            len(tool_calls),
+            ", ".join(tc["name"] for tc in tool_calls),
+        )
+    return tool_calls
+
+
+def _extract_text_from_responses_stream(lines: list[str]) -> str:
+    """Extract accumulated text content from buffered Responses API SSE lines."""
+    parts: list[str] = []
+    for raw_line in lines:
+        stripped = raw_line.strip()
+        if not stripped.startswith("data: "):
+            continue
+        payload = stripped[6:].strip()
+        if payload == "[DONE]":
+            continue
+        try:
+            data = json.loads(payload)
+        except json.JSONDecodeError:
+            continue
+        if data.get("type") != "response.output_text.delta":
+            continue
+        delta = data.get("delta", "")
+        if delta:
+            parts.append(delta)
+    return "".join(parts)
+
+
+def _extract_model_from_responses_sse(line: str) -> str | None:
+    """Try to extract the model from a Responses API SSE line."""
+    stripped = line.strip()
+    if not stripped.startswith("data: "):
+        return None
+    payload = stripped[6:].strip()
+    try:
+        data = json.loads(payload)
+    except (json.JSONDecodeError, AttributeError):
+        return None
+    if data.get("type") != "response.created":
+        return None
+    return data.get("response", {}).get("model")
 
 
 def _do_web_search_raw(query: str, max_results: int = 5) -> list[dict]:
@@ -1170,6 +1249,404 @@ async def handle_native_anthropic_messages(
     return JSONResponse(content=resp_data, status_code=resp.status_code)
 
 
+async def handle_anthropic_via_responses(
+    body: dict, *, request: Request | None = None, initiator: str | None = None,
+):
+    """Route an Anthropic Messages request through the OpenAI Responses API.
+
+    This is used for target models like gpt-5.4 that require ``/v1/responses``
+    to support ``reasoning_effort`` with function tools.
+    """
+    resolved = initiator or anthropic_adapter.infer_initiator(body)
+    resp_body = _anthropic_to_responses(body)
+    resp_body["model"] = _apply_model_map(resp_body.get("model", ""))
+    requested_model = resp_body.get("model", "")
+
+    logger.debug(
+        "Responses routing: source=anthropic requested_model=%s mapped_model=%s "
+        "thinking=%s output_config=%s",
+        body.get("model", ""),
+        requested_model,
+        body.get("thinking"),
+        body.get("output_config"),
+    )
+
+    resp_body = _normalize_request_params(
+        resp_body, "anthropic", requested_model, endpoint="responses",
+    )
+
+    client = await account_mgr.get_client(initiator=resolved)
+
+    if _free_within_minutes is not None and resolved == "user":
+        elapsed = await account_mgr.get_minutes_since_last_request(client)
+        if elapsed is not None and elapsed < _free_within_minutes:
+            resolved = "agent"
+            logger.info(
+                "free-within-minutes: last request %.1f min ago < %.1f → agent",
+                elapsed, _free_within_minutes,
+            )
+
+    account = account_mgr.get_username(client)
+    billed_status = "yes" if resolved == "user" else "no"
+    logger.info(
+        "Anthropic→Responses requested by %s (billed: %s, model: %s, account: %s)",
+        resolved, billed_status, requested_model, account,
+    )
+
+    is_stream = body.get("stream")
+
+    # Check whether we should intercept web_search calls
+    should_intercept_web_search = (
+        _web_search_max_iterations > 0
+        and any(
+            t.get("function", {}).get("name") == "web_search"
+            for t in resp_body.get("tools", [])
+        )
+    )
+
+    if is_stream:
+        converter = _AnthropicResponsesStreamConverter(body.get("model", ""))
+
+        async def event_stream():
+            nonlocal client, converter, resp_body
+            web_search_iterations = 0
+            while True:
+                first_chunk = True
+                needs_retry = False
+                buffered_lines: list[str] = []
+                has_function_calls = False
+
+                async for line in client.stream_responses(
+                    resp_body, initiator=resolved,
+                ):
+                    if request and await request.is_disconnected():
+                        return
+                    if line.startswith("error:"):
+                        if _is_rate_limit_error(line):
+                            logger.warning(
+                                "Rate limited on account, switching account"
+                            )
+                            fallback = await account_mgr.get_fallback_client(client)
+                            if fallback is not None:
+                                client = fallback
+                                converter = _AnthropicResponsesStreamConverter(
+                                    body.get("model", "")
+                                )
+                                needs_retry = True
+                                break
+                        _debug_error(body, line, upstream_body=resp_body)
+                        yield converter.format_error(line)
+                        return
+
+                    if first_chunk:
+                        resp_model = _extract_model_from_responses_sse(line)
+                        if resp_model is not None:
+                            first_chunk = False
+                            if not _is_model_match(requested_model, resp_model):
+                                logger.warning(
+                                    "Model mismatch: requested %s, got %s — "
+                                    "switching account",
+                                    requested_model, resp_model,
+                                )
+                                fallback = await account_mgr.get_fallback_client(
+                                    client
+                                )
+                                if fallback is not None:
+                                    client = fallback
+                                    converter = _AnthropicResponsesStreamConverter(
+                                        body.get("model", "")
+                                    )
+                                    needs_retry = True
+                                    break
+                            else:
+                                if not _force_free and resolved == "user":
+                                    await account_mgr.record_usage(
+                                        client, requested_model
+                                    )
+                                await account_mgr.record_request_time(client)
+
+                    # Buffer when we might need to intercept web_search
+                    if should_intercept_web_search:
+                        stripped = line.strip()
+                        if stripped.startswith("data: "):
+                            try:
+                                chunk_data = json.loads(stripped[6:])
+                                chunk_type = chunk_data.get("type", "")
+                                if chunk_type == "response.output_item.added":
+                                    item = chunk_data.get("item", {})
+                                    if item.get("type") == "function_call":
+                                        if not has_function_calls:
+                                            logger.debug(
+                                                "function_call detected in responses "
+                                                "stream — buffering for web_search check"
+                                            )
+                                        has_function_calls = True
+                            except json.JSONDecodeError:
+                                pass
+
+                    if has_function_calls:
+                        buffered_lines.append(line)
+                    else:
+                        result = converter.feed(line)
+                        if result:
+                            yield result
+
+                if needs_retry:
+                    continue
+
+                if not has_function_calls:
+                    return
+
+                # Check buffered tool calls for web_search
+                logger.debug(
+                    "Responses stream ended with %d buffered lines",
+                    len(buffered_lines),
+                )
+                tool_calls = _extract_tool_calls_from_responses_stream(
+                    buffered_lines
+                )
+                if not tool_calls:
+                    logger.debug(
+                        "No function_calls extracted — flushing %d lines",
+                        len(buffered_lines),
+                    )
+                    for bl in buffered_lines:
+                        result = converter.feed(bl)
+                        if result:
+                            yield result
+                    return
+
+                web_calls = [
+                    tc for tc in tool_calls if tc["name"] == "web_search"
+                ]
+                non_web = [
+                    tc for tc in tool_calls if tc["name"] != "web_search"
+                ]
+
+                if (
+                    not web_calls
+                    or non_web
+                    or web_search_iterations >= _web_search_max_iterations
+                ):
+                    if web_search_iterations >= _web_search_max_iterations:
+                        logger.warning(
+                            "web_search loop limit reached (%d), passing through",
+                            web_search_iterations,
+                        )
+                    for bl in buffered_lines:
+                        result = converter.feed(bl)
+                        if result:
+                            yield result
+                    return
+
+                # Pure web_search — execute server-side and continue
+                web_search_iterations += 1
+                logger.debug(
+                    "Intercepting %d web_search call(s) (responses, iter %d/%d)",
+                    len(web_calls),
+                    web_search_iterations,
+                    _web_search_max_iterations,
+                )
+
+                # Execute web searches
+                search_tool_calls = [
+                    {
+                        "id": tc["call_id"],
+                        "function": {
+                            "name": "web_search",
+                            "arguments": tc["arguments"],
+                        },
+                    }
+                    for tc in web_calls
+                ]
+                _, raw_data = await _execute_web_search_calls(search_tool_calls)
+
+                # Emit Anthropic web search blocks
+                if converter._block_started:
+                    yield converter._event("content_block_stop", {
+                        "type": "content_block_stop",
+                        "index": converter._block_index,
+                    })
+                    converter._block_started = False
+                    converter._block_index += 1
+
+                for query, raw_results in raw_data:
+                    yield _build_web_search_sse_events(
+                        query, raw_results, converter._block_index,
+                    )
+                    converter._block_index += 2
+
+                # Add function_call + function_call_output items to input
+                for tc in web_calls:
+                    resp_body["input"].append({
+                        "type": "function_call",
+                        "name": tc["name"],
+                        "arguments": tc["arguments"],
+                        "call_id": tc["call_id"],
+                    })
+                for tc, (query, raw_results) in zip(web_calls, raw_data):
+                    resp_body["input"].append({
+                        "type": "function_call_output",
+                        "call_id": tc["call_id"],
+                        "output": _format_search_results(raw_results),
+                    })
+
+                # Also append any text from the buffered response
+                text = _extract_text_from_responses_stream(buffered_lines)
+                if text:
+                    resp_body["input"].append({
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": text}],
+                    })
+
+                logger.info(
+                    "Continuing after web_search (input items: %d)",
+                    len(resp_body["input"]),
+                )
+                continue
+
+        return StreamingResponse(
+            event_stream(),
+            media_type="text/event-stream",
+            headers=_STREAM_HEADERS,
+        )
+
+    # Non-streaming
+    while True:
+        resp = await client.responses(resp_body, initiator=resolved)
+        if resp.status_code == 429:
+            logger.warning("Rate limited on account, switching account")
+            fallback = await account_mgr.get_fallback_client(client)
+            if fallback is not None:
+                client = fallback
+                continue
+
+        if resp.status_code != 200:
+            logger.error("API error %s: %s", resp.status_code, resp.text)
+            _debug_error(body, resp.text, upstream_body=resp_body)
+            try:
+                content = resp.json()
+            except Exception:
+                content = {"error": {"message": resp.text}}
+            return JSONResponse(content=content, status_code=resp.status_code)
+
+        resp_data = resp.json()
+        resp_model = resp_data.get("model", "")
+        if resp_model and not _is_model_match(requested_model, resp_model):
+            logger.warning(
+                "Model mismatch: requested %s, got %s — switching account",
+                requested_model, resp_model,
+            )
+            fallback = await account_mgr.get_fallback_client(client)
+            if fallback is not None:
+                client = fallback
+                continue
+        break
+
+    if not _force_free and resolved == "user":
+        await account_mgr.record_usage(client, requested_model)
+    await account_mgr.record_request_time(client)
+
+    # Check for web_search in non-streaming response
+    output_items = resp_data.get("output", [])
+    fn_calls = [
+        item for item in output_items if item.get("type") == "function_call"
+    ]
+    web_calls = [tc for tc in fn_calls if tc.get("name") == "web_search"]
+    non_web = [tc for tc in fn_calls if tc.get("name") != "web_search"]
+
+    # Web search interception loop
+    web_search_iterations = 0
+    all_raw_data: list[tuple[str, list[dict]]] = []
+    while (
+        web_calls
+        and not non_web
+        and should_intercept_web_search
+        and web_search_iterations < _web_search_max_iterations
+    ):
+        web_search_iterations += 1
+        logger.info(
+            "Intercepting %d web_search call(s) (responses non-streaming, "
+            "iter %d/%d)",
+            len(web_calls),
+            web_search_iterations,
+            _web_search_max_iterations,
+        )
+
+        search_tool_calls = [
+            {
+                "id": tc.get("call_id", ""),
+                "function": {
+                    "name": "web_search",
+                    "arguments": tc.get("arguments", ""),
+                },
+            }
+            for tc in web_calls
+        ]
+        _, raw_data = await _execute_web_search_calls(search_tool_calls)
+        all_raw_data.extend(raw_data)
+
+        # Append function_call items from output
+        for item in fn_calls:
+            resp_body["input"].append({
+                "type": "function_call",
+                "name": item.get("name", ""),
+                "arguments": item.get("arguments", ""),
+                "call_id": item.get("call_id", ""),
+            })
+        # Append function_call_output items
+        for tc, (query, raw_results) in zip(web_calls, raw_data):
+            resp_body["input"].append({
+                "type": "function_call_output",
+                "call_id": tc.get("call_id", ""),
+                "output": _format_search_results(raw_results),
+            })
+
+        # Append any text from the response
+        for item in output_items:
+            if item.get("type") == "message":
+                for part in item.get("content", []):
+                    if part.get("type") == "output_text" and part.get("text"):
+                        resp_body["input"].append({
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": part["text"]}],
+                        })
+
+        resp = await client.responses(resp_body, initiator=resolved)
+        if resp.status_code != 200:
+            logger.error(
+                "API error %s on web_search continuation: %s",
+                resp.status_code, resp.text,
+            )
+            try:
+                content = resp.json()
+            except Exception:
+                content = {"error": {"message": resp.text}}
+            return JSONResponse(content=content, status_code=resp.status_code)
+
+        resp_data = resp.json()
+        output_items = resp_data.get("output", [])
+        fn_calls = [
+            item for item in output_items if item.get("type") == "function_call"
+        ]
+        web_calls = [tc for tc in fn_calls if tc.get("name") == "web_search"]
+        non_web = [tc for tc in fn_calls if tc.get("name") != "web_search"]
+
+    anthropic_resp = _responses_to_anthropic(resp_data, body.get("model", ""))
+
+    # Prepend web search content blocks for Anthropic clients
+    if all_raw_data:
+        web_blocks: list[dict] = []
+        for query, raw_results in all_raw_data:
+            blocks, _ = _build_web_search_content_blocks(query, raw_results)
+            web_blocks.extend(blocks)
+        anthropic_resp["content"] = web_blocks + anthropic_resp.get("content", [])
+
+    return JSONResponse(content=anthropic_resp, status_code=resp.status_code)
+
+
 # ---------------------------------------------------------------------------
 # OpenAI endpoints
 # ---------------------------------------------------------------------------
@@ -1402,6 +1879,11 @@ async def messages(request: Request):
     ):
         body["model"] = mapped_model
         return await handle_native_anthropic_messages(
+            body, request=request, initiator=_get_initiator(request)
+        )
+    if _should_use_responses_api(mapped_model):
+        body["model"] = mapped_model
+        return await handle_anthropic_via_responses(
             body, request=request, initiator=_get_initiator(request)
         )
     return await handle_chat_completion(

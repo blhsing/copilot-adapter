@@ -27,6 +27,90 @@ def _assistant_content_or_empty(text_parts: list[str]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Shared Anthropic tool schemas and conversion helpers
+# ---------------------------------------------------------------------------
+
+_BUILTIN_TOOL_SCHEMAS = {
+    "web_search": {
+        "description": "Search the web for information.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "The search query.",
+                },
+            },
+            "required": ["query"],
+        },
+    },
+}
+
+
+def _convert_anthropic_tools(tools: list[dict]) -> list[dict]:
+    """Convert Anthropic tool definitions to OpenAI function tool format."""
+    func_tools = []
+    for t in tools:
+        tool_type = t.get("type", "")
+        builtin_key = None
+        for prefix in _BUILTIN_TOOL_SCHEMAS:
+            if tool_type.startswith(prefix):
+                builtin_key = prefix
+                break
+        if builtin_key:
+            schema = _BUILTIN_TOOL_SCHEMAS[builtin_key]
+            tool_name = t.get("name", builtin_key)
+            logger.info(
+                "Converting Anthropic built-in tool type=%s -> "
+                "function tool name=%s",
+                tool_type, tool_name,
+            )
+            func_tools.append({
+                "type": "function",
+                "function": {
+                    "name": tool_name,
+                    "description": schema["description"],
+                    "parameters": schema["parameters"],
+                },
+            })
+        elif tool_type not in ("", "function", "custom"):
+            logger.info("Stripping unsupported built-in tool type=%s", tool_type)
+        else:
+            func_tools.append({
+                "type": "function",
+                "function": {
+                    "name": t["name"],
+                    "description": t.get("description", ""),
+                    "parameters": t.get("input_schema", {}),
+                },
+            })
+    return func_tools
+
+
+def _convert_anthropic_tool_choice(tc, available_tools: list[dict]) -> str | dict | None:
+    """Convert Anthropic tool_choice to OpenAI format."""
+    if not tc:
+        return None
+    tc_type = tc.get("type") if isinstance(tc, dict) else tc
+    if tc_type == "tool":
+        forced_name = tc.get("name", "")
+        has_tool = any(
+            ft["function"]["name"] == forced_name
+            for ft in available_tools
+        )
+        if has_tool:
+            return {"type": "function", "function": {"name": forced_name}}
+        return None
+    elif tc_type == "auto":
+        return "auto"
+    elif tc_type == "any":
+        return "required"
+    elif tc_type == "none":
+        return "none"
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Request conversion: Anthropic -> OpenAI
 # ---------------------------------------------------------------------------
 
@@ -162,81 +246,97 @@ def _anthropic_to_openai(body: dict) -> dict:
     if "stop_sequences" in body:
         result["stop"] = body["stop_sequences"]
 
-    # Anthropic built-in tool types — converted to OpenAI function tools.
-    # These are passed through as regular function tools for the client to
-    # handle (web_search, text_editor, code_execution).
-    _BUILTIN_TOOL_SCHEMAS = {
-        "web_search": {
-            "description": "Search the web for information.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "The search query.",
-                    },
-                },
-                "required": ["query"],
-            },
-        },
-    }
-
     if "tools" in body:
-        func_tools = []
-        for t in body["tools"]:
-            tool_type = t.get("type", "")
-            # Check for Anthropic built-in tools by type prefix
-            builtin_key = None
-            for prefix in _BUILTIN_TOOL_SCHEMAS:
-                if tool_type.startswith(prefix):
-                    builtin_key = prefix
-                    break
-            if builtin_key:
-                schema = _BUILTIN_TOOL_SCHEMAS[builtin_key]
-                tool_name = t.get("name", builtin_key)
-                logger.info(
-                    "Converting Anthropic built-in tool type=%s -> "
-                    "function tool name=%s",
-                    tool_type, tool_name,
-                )
-                func_tools.append({
-                    "type": "function",
-                    "function": {
-                        "name": tool_name,
-                        "description": schema["description"],
-                        "parameters": schema["parameters"],
-                    },
-                })
-            elif tool_type not in ("", "function", "custom"):
-                # Unsupported Anthropic built-in tool type — strip it
-                logger.info("Stripping unsupported built-in tool type=%s", tool_type)
-            else:
-                func_tools.append({
-                    "type": "function",
-                    "function": {
-                        "name": t["name"],
-                        "description": t.get("description", ""),
-                        "parameters": t.get("input_schema", {}),
-                    },
-                })
+        func_tools = _convert_anthropic_tools(body["tools"])
         if func_tools:
             result["tools"] = func_tools
+
+    tc_converted = _convert_anthropic_tool_choice(
+        body.get("tool_choice"), result.get("tools", [])
+    )
+    if tc_converted is not None:
+        result["tool_choice"] = tc_converted
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Request conversion: Anthropic -> OpenAI Responses API
+# ---------------------------------------------------------------------------
+
+def _anthropic_to_responses(body: dict) -> dict:
+    """Convert an Anthropic Messages body to an OpenAI Responses API body."""
+    input_items: list[dict] = []
+    tool_id_map: dict[str, str] = {}
+
+    model = body.get("model", "")
+
+    # System prompt → developer role
+    system = body.get("system")
+    if system:
+        if isinstance(system, list):
+            text = "\n".join(b.get("text", "") for b in system)
+        else:
+            text = system
+        input_items.append({"role": "developer", "content": text})
+
+    # Messages
+    for msg in body.get("messages", []):
+        role = msg["role"]
+        content = msg["content"]
+
+        if isinstance(content, str):
+            input_items.append({"role": role, "content": content})
+        elif isinstance(content, list):
+            _convert_blocks_to_responses_items(
+                content, role, input_items, tool_id_map,
+            )
+        else:
+            input_items.append({"role": role, "content": content})
+
+    result: dict = {
+        "model": model,
+        "input": input_items,
+        "stream": body.get("stream", False),
+    }
+
+    if "max_tokens" in body:
+        # OpenAI Responses API enforces a minimum of 16 output tokens.
+        result["max_output_tokens"] = max(16, body["max_tokens"])
+    if "thinking" in body:
+        result["_copilot_adapter_thinking"] = body["thinking"]
+    if isinstance(body.get("output_config"), dict) and body["output_config"].get("effort"):
+        result["_copilot_adapter_output_effort"] = body["output_config"]["effort"]
+    if "temperature" in body:
+        result["temperature"] = body["temperature"]
+    if "top_p" in body:
+        result["top_p"] = body["top_p"]
+    if "stop_sequences" in body:
+        result["stop"] = body["stop_sequences"]
+
+    if "tools" in body:
+        func_tools = _convert_anthropic_tools(body["tools"])
+        # Responses API uses flat tool format: {type, name, description, parameters}
+        # instead of chat/completions nested {type, function: {name, ...}}
+        resp_tools = []
+        for ft in func_tools:
+            fn = ft.get("function", {})
+            resp_tools.append({
+                "type": "function",
+                "name": fn.get("name", ""),
+                "description": fn.get("description", ""),
+                "parameters": fn.get("parameters", {}),
+            })
+        if resp_tools:
+            result["tools"] = resp_tools
 
     tc = body.get("tool_choice")
     if tc:
         tc_type = tc.get("type") if isinstance(tc, dict) else tc
         if tc_type == "tool":
             forced_name = tc.get("name", "")
-            has_tool = any(
-                ft["function"]["name"] == forced_name
-                for ft in result.get("tools", [])
-            )
-            if has_tool:
-                result["tool_choice"] = {
-                    "type": "function",
-                    "function": {"name": forced_name},
-                }
-            # else: tool not found, omit tool_choice
+            if any(t.get("name") == forced_name for t in result.get("tools", [])):
+                result["tool_choice"] = {"type": "function", "name": forced_name}
         elif tc_type == "auto":
             result["tool_choice"] = "auto"
         elif tc_type == "any":
@@ -245,6 +345,84 @@ def _anthropic_to_openai(body: dict) -> dict:
             result["tool_choice"] = "none"
 
     return result
+
+
+def _convert_blocks_to_responses_items(
+    blocks: list, role: str, items: list[dict], tool_id_map: dict[str, str],
+) -> None:
+    """Convert Anthropic content blocks to Responses API input items in-place."""
+    text_parts: list[str] = []
+    multimodal_parts: list[dict] = []
+    has_multimodal = False
+
+    def _flush_text():
+        nonlocal has_multimodal
+        if has_multimodal and multimodal_parts:
+            items.append({"role": role, "content": list(multimodal_parts)})
+            multimodal_parts.clear()
+            text_parts.clear()
+            has_multimodal = False
+        elif text_parts:
+            if role == "assistant":
+                items.append({
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "\n".join(text_parts)}],
+                })
+            else:
+                items.append({"role": role, "content": "\n".join(text_parts)})
+            text_parts.clear()
+            multimodal_parts.clear()
+
+    for block in blocks:
+        btype = block.get("type")
+
+        if btype == "text":
+            text_parts.append(block["text"])
+            multimodal_parts.append({"type": "input_text", "text": block["text"]})
+
+        elif btype == "image":
+            has_multimodal = True
+            source = block["source"]
+            if source["type"] == "base64":
+                url = f"data:{source['media_type']};base64,{source['data']}"
+            else:
+                url = source["url"]
+            multimodal_parts.append({"type": "input_image", "image_url": url})
+
+        elif btype == "tool_use":
+            _flush_text()
+            original_id = block["id"]
+            call_id = tool_id_map.setdefault(
+                original_id,
+                _normalize_openai_tool_id(original_id),
+            )
+            items.append({
+                "type": "function_call",
+                "name": block["name"],
+                "arguments": json.dumps(block["input"]),
+                "call_id": call_id,
+            })
+
+        elif btype == "tool_result":
+            _flush_text()
+            tool_content = block.get("content", "")
+            if isinstance(tool_content, list):
+                tool_content = "\n".join(
+                    b.get("text", "") for b in tool_content if b.get("type") == "text"
+                )
+            original_id = block["tool_use_id"]
+            call_id = tool_id_map.get(
+                original_id,
+                _normalize_openai_tool_id(original_id),
+            )
+            items.append({
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": str(tool_content),
+            })
+
+    _flush_text()
 
 
 # ---------------------------------------------------------------------------
@@ -310,8 +488,261 @@ def _openai_to_anthropic(openai_resp: dict, model: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Stream converter
+# Response conversion: OpenAI Responses API -> Anthropic
 # ---------------------------------------------------------------------------
+
+_RESPONSES_STATUS_MAP = {
+    "completed": "end_turn",
+    "incomplete": "max_tokens",
+    "failed": "end_turn",
+}
+
+
+def _responses_to_anthropic(resp: dict, model: str) -> dict:
+    """Convert an OpenAI Responses API response to Anthropic Messages format."""
+    content: list[dict] = []
+    has_function_calls = False
+
+    for item in resp.get("output", []):
+        item_type = item.get("type", "")
+
+        if item_type == "message":
+            for part in item.get("content", []):
+                part_type = part.get("type", "")
+                if part_type == "output_text":
+                    content.append({"type": "text", "text": part.get("text", "")})
+                elif part_type == "refusal":
+                    content.append({"type": "text", "text": part.get("refusal", "")})
+
+        elif item_type == "function_call":
+            has_function_calls = True
+            call_id = item.get("call_id", f"toolu_{uuid.uuid4().hex[:24]}")
+            name = item.get("name", "")
+            try:
+                input_obj = json.loads(item.get("arguments", "{}"))
+            except json.JSONDecodeError:
+                input_obj = {}
+            logger.info("Responses API tool_use: id=%s name=%s", call_id, name)
+            content.append({
+                "type": "tool_use",
+                "id": call_id,
+                "name": name,
+                "input": input_obj,
+            })
+
+    if not content:
+        content.append({"type": "text", "text": ""})
+
+    status = resp.get("status", "completed")
+    if has_function_calls:
+        stop_reason = "tool_use"
+    else:
+        stop_reason = _RESPONSES_STATUS_MAP.get(status, "end_turn")
+
+    usage = resp.get("usage", {})
+
+    return {
+        "id": f"msg_{uuid.uuid4().hex[:24]}",
+        "type": "message",
+        "role": "assistant",
+        "content": content,
+        "model": model,
+        "stop_reason": stop_reason,
+        "stop_sequence": None,
+        "usage": {
+            "input_tokens": usage.get("input_tokens", 0),
+            "output_tokens": usage.get("output_tokens", 0),
+        },
+    }
+
+# ---------------------------------------------------------------------------
+# Stream converters
+# ---------------------------------------------------------------------------
+
+class _AnthropicResponsesStreamConverter(StreamConverter):
+    """Convert OpenAI Responses API SSE events to Anthropic SSE events."""
+
+    def __init__(self, model: str):
+        self._model = model
+        self._started = False
+        self._block_started = False
+        self._block_index = 0
+        self._input_tokens = 0
+        self._output_tokens = 0
+        self._stop_reason: str | None = None
+
+    def _event(self, event_type: str, data: dict) -> str:
+        return f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
+
+    def format_error(self, error_line: str) -> str:
+        return f"event: error\ndata: {error_line}\n\n"
+
+    def feed(self, line: str) -> str:
+        line = line.strip()
+        if not line:
+            return ""
+
+        # Responses API SSE uses both event: and data: lines.
+        # Skip event: lines — the type field inside data: is sufficient.
+        if not line.startswith("data: "):
+            return ""
+
+        payload = line[6:].strip()
+        if payload == "[DONE]":
+            return ""
+
+        try:
+            data = json.loads(payload)
+        except json.JSONDecodeError:
+            return ""
+
+        event_type = data.get("type", "")
+        output = ""
+
+        if event_type == "response.created":
+            if not self._started:
+                self._started = True
+                output += self._event("message_start", {
+                    "type": "message_start",
+                    "message": {
+                        "id": f"msg_{uuid.uuid4().hex[:24]}",
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [],
+                        "model": self._model,
+                        "stop_reason": None,
+                        "stop_sequence": None,
+                        "usage": {
+                            "input_tokens": 0,
+                            "output_tokens": 0,
+                        },
+                    },
+                })
+
+        elif event_type == "response.content_part.added":
+            part = data.get("part", {})
+            if part.get("type") == "output_text":
+                if self._block_started:
+                    output += self._event("content_block_stop", {
+                        "type": "content_block_stop",
+                        "index": self._block_index,
+                    })
+                    self._block_index += 1
+                self._block_started = True
+                output += self._event("content_block_start", {
+                    "type": "content_block_start",
+                    "index": self._block_index,
+                    "content_block": {"type": "text", "text": ""},
+                })
+
+        elif event_type == "response.output_text.delta":
+            delta_text = data.get("delta", "")
+            if delta_text:
+                if not self._block_started:
+                    self._block_started = True
+                    output += self._event("content_block_start", {
+                        "type": "content_block_start",
+                        "index": self._block_index,
+                        "content_block": {"type": "text", "text": ""},
+                    })
+                output += self._event("content_block_delta", {
+                    "type": "content_block_delta",
+                    "index": self._block_index,
+                    "delta": {"type": "text_delta", "text": delta_text},
+                })
+
+        elif event_type == "response.output_item.added":
+            item = data.get("item", {})
+            if item.get("type") == "function_call":
+                if self._block_started:
+                    output += self._event("content_block_stop", {
+                        "type": "content_block_stop",
+                        "index": self._block_index,
+                    })
+                    self._block_index += 1
+                self._block_started = True
+                call_id = item.get("call_id", f"toolu_{uuid.uuid4().hex[:24]}")
+                name = item.get("name", "")
+                output += self._event("content_block_start", {
+                    "type": "content_block_start",
+                    "index": self._block_index,
+                    "content_block": {
+                        "type": "tool_use",
+                        "id": call_id,
+                        "name": name,
+                        "input": {},
+                    },
+                })
+
+        elif event_type == "response.function_call_arguments.delta":
+            args_chunk = data.get("delta", "")
+            if args_chunk:
+                output += self._event("content_block_delta", {
+                    "type": "content_block_delta",
+                    "index": self._block_index,
+                    "delta": {
+                        "type": "input_json_delta",
+                        "partial_json": args_chunk,
+                    },
+                })
+
+        elif event_type == "response.output_item.done":
+            item = data.get("item", {})
+            if item.get("type") == "function_call":
+                if self._block_started:
+                    output += self._event("content_block_stop", {
+                        "type": "content_block_stop",
+                        "index": self._block_index,
+                    })
+                    self._block_started = False
+                    self._block_index += 1
+                self._stop_reason = "tool_use"
+
+        elif event_type == "response.content_part.done":
+            if self._block_started:
+                output += self._event("content_block_stop", {
+                    "type": "content_block_stop",
+                    "index": self._block_index,
+                })
+                self._block_started = False
+                self._block_index += 1
+
+        elif event_type == "response.completed":
+            resp = data.get("response", {})
+            usage = resp.get("usage", {})
+            self._input_tokens = usage.get("input_tokens", self._input_tokens)
+            self._output_tokens = usage.get("output_tokens", self._output_tokens)
+
+            if self._block_started:
+                output += self._event("content_block_stop", {
+                    "type": "content_block_stop",
+                    "index": self._block_index,
+                })
+                self._block_started = False
+
+            # Derive stop reason from response status
+            status = resp.get("status", "completed")
+            has_fn_calls = any(
+                item.get("type") == "function_call"
+                for item in resp.get("output", [])
+            )
+            if has_fn_calls:
+                stop = "tool_use"
+            else:
+                stop = self._stop_reason or _RESPONSES_STATUS_MAP.get(status, "end_turn")
+
+            output += self._event("message_delta", {
+                "type": "message_delta",
+                "delta": {"stop_reason": stop, "stop_sequence": None},
+                "usage": {
+                    "input_tokens": self._input_tokens,
+                    "output_tokens": self._output_tokens,
+                },
+            })
+            output += self._event("message_stop", {"type": "message_stop"})
+
+        return output
+
 
 class _AnthropicStreamConverter(StreamConverter):
     def __init__(self, model: str):
