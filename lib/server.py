@@ -4,6 +4,8 @@ import asyncio
 import json
 import logging
 import os
+import re
+import uuid
 from contextlib import asynccontextmanager
 from fnmatch import fnmatch
 from pathlib import Path
@@ -41,10 +43,12 @@ _STREAM_HEADERS = {
     "X-Accel-Buffering": "no",
 }
 
+_MESSAGE_INDEX_RE = re.compile(r"messages\[(\d+)\]")
+
 
 def _normalize_model_name(name: str) -> str:
     """Normalize a model name for comparison (lowercase, collapse separators)."""
-    return name.lower().replace(" ", "-").replace("_", "-")
+    return name.lower().replace(" ", "-").replace("_", "-").replace(".", "-")
 
 
 def _is_model_match(requested: str, responded: str) -> bool:
@@ -81,6 +85,31 @@ def _infer_provider_from_model(model: str) -> str:
     return "openai"
 
 
+def _should_use_native_anthropic_api(source_provider: str, target_model: str) -> bool:
+    """Return True when Anthropic requests can stay in native Messages format."""
+    return (
+        source_provider == "anthropic"
+        and _infer_provider_from_model(target_model) == "anthropic"
+    )
+
+
+def _anthropic_has_interceptable_web_search(body: dict) -> bool:
+    """Return True when an Anthropic request uses built-in web_search."""
+    if _web_search_max_iterations <= 0:
+        return False
+    tools = body.get("tools")
+    if not isinstance(tools, list):
+        return False
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        tool_type = str(tool.get("type", ""))
+        tool_name = str(tool.get("name", ""))
+        if tool_type.startswith("web_search") or tool_name == "web_search":
+            return True
+    return False
+
+
 def _target_prefers_max_completion_tokens(model: str) -> bool:
     """Return True if *model* prefers ``max_completion_tokens`` instead of ``max_tokens``."""
     return _infer_provider_from_model(model) == "openai"
@@ -104,15 +133,55 @@ def _normalize_thinking_to_effort(thinking: dict) -> str | None:
     return "low"
 
 
+def _normalize_output_effort(effort: str | None) -> str | None:
+    """Convert Anthropic/Claude effort labels to canonical reasoning effort."""
+    if not isinstance(effort, str) or not effort:
+        return None
+    normalized = effort.lower()
+    return {
+        "low": "low",
+        "medium": "medium",
+        "high": "high",
+        "max": "xhigh",
+    }.get(normalized)
+
+
 def _normalize_reasoning_params(openai_body: dict, source_provider: str, target_model: str) -> None:
     """Normalize cross-provider reasoning params for the mapped target model."""
     target_provider = _infer_provider_from_model(target_model)
 
     if source_provider == "anthropic":
         thinking = openai_body.pop("_copilot_adapter_thinking", None)
-        effort = _normalize_thinking_to_effort(thinking)
+        output_effort = openai_body.pop("_copilot_adapter_output_effort", None)
+        effort = _normalize_output_effort(output_effort) or _normalize_thinking_to_effort(thinking)
+        logger.debug(
+            "Reasoning normalization: source=%s target=%s provider=%s thinking=%s output_effort=%s derived_effort=%s",
+            source_provider,
+            target_model,
+            target_provider,
+            thinking,
+            output_effort,
+            effort,
+        )
         if effort and target_provider == "openai":
             openai_body["reasoning_effort"] = effort
+            logger.debug(
+                "Reasoning normalization applied: target=%s reasoning_effort=%s",
+                target_model,
+                effort,
+            )
+        elif (thinking or output_effort) and not effort:
+            logger.debug(
+                "Reasoning normalization skipped: inputs did not map to effort (thinking=%s, output_effort=%s)",
+                thinking,
+                output_effort,
+            )
+        elif effort and target_provider != "openai":
+            logger.debug(
+                "Reasoning normalization skipped: derived_effort=%s but target provider is %s",
+                effort,
+                target_provider,
+            )
 
 
 def _normalize_token_limit_params(openai_body: dict, target_model: str) -> None:
@@ -121,16 +190,38 @@ def _normalize_token_limit_params(openai_body: dict, target_model: str) -> None:
         openai_body["max_completion_tokens"] = openai_body.pop("max_tokens")
 
 
-def _normalize_request_params(openai_body: dict, source_provider: str, target_model: str) -> dict:
+def _normalize_request_params(
+    openai_body: dict,
+    source_provider: str,
+    target_model: str,
+    *,
+    endpoint: str = "chat_completions",
+) -> dict:
     """Normalize provider/model-specific params after model mapping."""
     _normalize_token_limit_params(openai_body, target_model)
     _normalize_reasoning_params(openai_body, source_provider, target_model)
     if "reasoning_effort" in openai_body:
-        logger.debug(
-            "Model map compatibility: target=%s reasoning_effort=%s",
-            target_model,
-            openai_body["reasoning_effort"],
-        )
+        # Some models (e.g. gpt-5.4) reject reasoning_effort + function
+        # tools in /v1/chat/completions (requires /v1/responses instead).
+        # Strip only for that known-incompatible chat/completions case.
+        has_tools = bool(openai_body.get("tools"))
+        incompatible_chat_model = target_model == "gpt-5.4"
+        if endpoint == "chat_completions" and has_tools and incompatible_chat_model:
+            stripped = openai_body.pop("reasoning_effort")
+            logger.warning(
+                "Stripped reasoning_effort=%s for target=%s on %s — "
+                "reasoning_effort with tools requires /v1/responses",
+                stripped,
+                target_model,
+                endpoint,
+            )
+        else:
+            logger.debug(
+                "Model map compatibility: target=%s endpoint=%s reasoning_effort=%s",
+                target_model,
+                endpoint,
+                openai_body["reasoning_effort"],
+            )
     return openai_body
 
 
@@ -190,8 +281,22 @@ def _extract_tool_calls_from_stream(lines: list[str]) -> list[dict]:
             if tc.get("id"):
                 entry["id"] = tc["id"]
             if func.get("name"):
-                entry["function"]["name"] = func["name"]
+                current_name = entry["function"]["name"]
+                incoming_name = func["name"]
+                if not current_name:
+                    entry["function"]["name"] = incoming_name
+                elif incoming_name.startswith(current_name):
+                    entry["function"]["name"] = incoming_name
+                elif not current_name.endswith(incoming_name):
+                    entry["function"]["name"] += incoming_name
             entry["function"]["arguments"] += func.get("arguments", "")
+    incomplete = [i for i, tc in tool_calls.items() if not tc["function"]["name"]]
+    if incomplete:
+        logger.warning(
+            "Discarding buffered tool calls with missing names at indexes: %s",
+            ", ".join(str(i) for i in incomplete),
+        )
+        return []
     result = [tool_calls[i] for i in sorted(tool_calls)]
     if result:
         logger.info(
@@ -223,41 +328,55 @@ def _extract_text_from_stream(lines: list[str]) -> str:
     return "".join(parts)
 
 
-def _do_web_search(query: str, max_results: int = 5) -> str:
-    """Run a DuckDuckGo search synchronously and return formatted results."""
+def _do_web_search_raw(query: str, max_results: int = 5) -> list[dict]:
+    """Run a DuckDuckGo search synchronously and return raw result dicts."""
     try:
         from ddgs import DDGS
     except ImportError:
         logger.warning("ddgs package not installed — web_search unavailable")
-        return "Web search is not available (ddgs package not installed)."
+        return []
 
     proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY") or None
     try:
-        results = DDGS(proxy=proxy).text(query, max_results=max_results)
+        return DDGS(proxy=proxy).text(query, max_results=max_results) or []
     except Exception as e:
         logger.error("DuckDuckGo search failed: %s", e)
-        return f"Web search error: {e}"
+        return []
 
+
+def _format_search_results(results: list[dict]) -> str:
+    """Format raw DDG result dicts as markdown text for tool result messages."""
     if not results:
         return "No search results found."
-
     lines = []
     for r in results:
         lines.append(f"[{r.get('title', '')}]({r.get('href', '')})")
         lines.append(r.get("body", ""))
         lines.append("")
-    text = "\n".join(lines).strip()
+    return "\n".join(lines).strip()
+
+
+def _do_web_search(query: str, max_results: int = 5) -> str:
+    """Run a DuckDuckGo search synchronously and return formatted results."""
+    results = _do_web_search_raw(query, max_results)
+    text = _format_search_results(results)
     logger.info("Web search returned %d results (%d chars) for query=%r",
                 len(results), len(text), query)
     return text
 
 
-async def _execute_web_search_calls(tool_calls: list[dict]) -> list[dict]:
+async def _execute_web_search_calls(
+    tool_calls: list[dict],
+) -> tuple[list[dict], list[tuple[str, list[dict]]]]:
     """Execute web_search tool calls via DuckDuckGo.
 
-    Returns a list of OpenAI-format tool result messages.
+    Returns:
+        (tool_result_messages, [(query, raw_results), ...])
+        where tool_result_messages are OpenAI-format tool result messages
+        and raw_results are the raw DDG result dicts per query.
     """
     results = []
+    raw_data: list[tuple[str, list[dict]]] = []
     for tc in tool_calls:
         if tc["function"]["name"] != "web_search":
             continue
@@ -268,13 +387,125 @@ async def _execute_web_search_calls(tool_calls: list[dict]) -> list[dict]:
         query = args.get("query", "")
         logger.debug("Executing web_search: query=%r", query)
         # ddgs is synchronous — run in a thread to avoid blocking the event loop
-        text = await asyncio.to_thread(_do_web_search, query)
+        raw = await asyncio.to_thread(_do_web_search_raw, query)
+        text = _format_search_results(raw)
+        logger.info("Web search returned %d results (%d chars) for query=%r",
+                    len(raw), len(text), query)
+        raw_data.append((query, raw))
         results.append({
             "role": "tool",
             "tool_call_id": tc["id"],
             "content": text,
         })
-    return results
+    return results, raw_data
+
+
+def _build_web_search_sse_events(
+    query: str, raw_results: list[dict], start_index: int,
+) -> str:
+    """Build Anthropic SSE events for server_tool_use + web_search_tool_result.
+
+    Returns a string of SSE events that can be yielded directly into the
+    Anthropic streaming response.
+    """
+    tool_id = f"srvtoolu_{uuid.uuid4().hex[:24]}"
+
+    def _ev(event_type: str, data: dict) -> str:
+        return f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
+
+    events = ""
+
+    # Block N: server_tool_use
+    events += _ev("content_block_start", {
+        "type": "content_block_start",
+        "index": start_index,
+        "content_block": {
+            "type": "server_tool_use",
+            "id": tool_id,
+            "name": "web_search",
+            "input": {},
+        },
+    })
+    events += _ev("content_block_delta", {
+        "type": "content_block_delta",
+        "index": start_index,
+        "delta": {
+            "type": "input_json_delta",
+            "partial_json": json.dumps({"query": query}),
+        },
+    })
+    events += _ev("content_block_stop", {
+        "type": "content_block_stop",
+        "index": start_index,
+    })
+
+    # Block N+1: web_search_tool_result
+    search_results = []
+    for r in raw_results:
+        search_results.append({
+            "type": "web_search_result",
+            "url": r.get("href", ""),
+            "title": r.get("title", ""),
+            "encrypted_content": r.get("body", ""),
+            "page_age": "",
+        })
+
+    events += _ev("content_block_start", {
+        "type": "content_block_start",
+        "index": start_index + 1,
+        "content_block": {
+            "type": "web_search_tool_result",
+            "tool_use_id": tool_id,
+            "content": [],
+        },
+    })
+    if search_results:
+        events += _ev("content_block_delta", {
+            "type": "content_block_delta",
+            "index": start_index + 1,
+            "delta": {
+                "type": "web_search_result_delta",
+                "search_results": search_results,
+            },
+        })
+    events += _ev("content_block_stop", {
+        "type": "content_block_stop",
+        "index": start_index + 1,
+    })
+
+    return events
+
+
+def _build_web_search_content_blocks(
+    query: str, raw_results: list[dict],
+) -> tuple[list[dict], str]:
+    """Build Anthropic content blocks for server_tool_use + web_search_tool_result.
+
+    Returns (content_blocks, tool_id).
+    """
+    tool_id = f"srvtoolu_{uuid.uuid4().hex[:24]}"
+    search_results = []
+    for r in raw_results:
+        search_results.append({
+            "type": "web_search_result",
+            "url": r.get("href", ""),
+            "title": r.get("title", ""),
+            "encrypted_content": r.get("body", ""),
+            "page_age": "",
+        })
+    return [
+        {
+            "type": "server_tool_use",
+            "id": tool_id,
+            "name": "web_search",
+            "input": {"query": query},
+        },
+        {
+            "type": "web_search_tool_result",
+            "tool_use_id": tool_id,
+            "content": search_results,
+        },
+    ], tool_id
 
 
 @asynccontextmanager
@@ -410,15 +641,135 @@ def _is_rate_limit_error(line: str) -> bool:
     return line.startswith("error: 429")
 
 
-def _debug_error(request_body: dict, response_body: str | dict) -> None:
+def _passthrough_sse_line(line: str) -> str:
+    """Format an upstream SSE line for passthrough streaming responses."""
+    if line.strip():
+        return f"{line}\n"
+    if line == "":
+        return "\n"
+    return ""
+
+
+def _sanitize_native_anthropic_body(body: dict) -> dict:
+    """Drop known unsupported fields before native Anthropic upstream calls."""
+    sanitized = dict(body)
+    sanitized.pop("context_management", None)
+    return sanitized
+
+
+def _extract_error_message_index(response_body: str | dict) -> int | None:
+    """Extract a failing ``messages[N]`` index from an error body if present."""
+    if isinstance(response_body, dict):
+        text = json.dumps(response_body, ensure_ascii=False)
+    else:
+        text = response_body
+    match = _MESSAGE_INDEX_RE.search(text)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def _message_debug_outline(message: dict, index: int) -> dict:
+    """Build a compact per-message summary for debug logging."""
+    outline = {"index": index, "role": message.get("role", "")}
+
+    content = message.get("content")
+    if isinstance(content, str):
+        outline["content"] = "text"
+        outline["content_chars"] = len(content)
+    elif isinstance(content, list):
+        outline["content"] = "blocks"
+        outline["block_count"] = len(content)
+        block_types = []
+        text_chars = 0
+        for block in content[:8]:
+            if not isinstance(block, dict):
+                continue
+            block_type = block.get("type", "")
+            if block_type:
+                block_types.append(block_type)
+            if block_type == "text":
+                text_chars += len(block.get("text", ""))
+        if block_types:
+            outline["block_types"] = block_types
+        if text_chars:
+            outline["text_chars"] = text_chars
+    elif content is None:
+        outline["content"] = "null"
+    else:
+        outline["content"] = type(content).__name__
+
+    tool_calls = message.get("tool_calls")
+    if isinstance(tool_calls, list):
+        outline["tool_call_count"] = len(tool_calls)
+        tool_names = [
+            tc.get("function", {}).get("name", "")
+            for tc in tool_calls[:5]
+        ]
+        if tool_names:
+            outline["tool_names"] = tool_names
+        empty_tool_names = [
+            pos for pos, tc in enumerate(tool_calls)
+            if not tc.get("function", {}).get("name")
+        ]
+        if empty_tool_names:
+            outline["empty_tool_names"] = empty_tool_names[:5]
+        outline["tool_id_lengths"] = [
+            len(tc.get("id", ""))
+            for tc in tool_calls[:5]
+        ]
+
+    if "tool_call_id" in message:
+        outline["tool_call_id_len"] = len(str(message.get("tool_call_id", "")))
+
+    return outline
+
+
+def _log_request_message_debug(label: str, request_body: dict) -> None:
+    """Log compact summaries for request messages when debugging errors."""
+    messages = request_body.get("messages")
+    if not isinstance(messages, list):
+        return
+    outlines = [_message_debug_outline(message, i) for i, message in enumerate(messages)]
+    logger.debug("%s message outlines: %s", label, json.dumps(outlines, ensure_ascii=False))
+
+
+def _debug_error(
+    request_body: dict,
+    response_body: str | dict,
+    *,
+    upstream_body: dict | None = None,
+) -> None:
     """Log full request and response bodies at DEBUG level on errors."""
     if not logger.isEnabledFor(logging.DEBUG):
         return
     logger.debug("Error request body: %s", json.dumps(request_body, ensure_ascii=False))
+    _log_request_message_debug("Error request", request_body)
+    if upstream_body is not None:
+        logger.debug("Upstream error request body: %s", json.dumps(upstream_body, ensure_ascii=False))
+        _log_request_message_debug("Upstream error request", upstream_body)
     if isinstance(response_body, dict):
         logger.debug("Error response body: %s", json.dumps(response_body, ensure_ascii=False))
     else:
         logger.debug("Error response body: %s", response_body)
+
+    indexed_body = upstream_body if upstream_body is not None else request_body
+    messages = indexed_body.get("messages")
+    error_index = _extract_error_message_index(response_body)
+    if not isinstance(messages, list) or error_index is None:
+        return
+    if error_index < 0 or error_index >= len(messages):
+        return
+
+    logger.debug(
+        "Upstream error message[%d]: %s",
+        error_index,
+        json.dumps(messages[error_index], ensure_ascii=False),
+    )
+    start = max(0, error_index - 2)
+    end = min(len(messages), error_index + 3)
+    window = [_message_debug_outline(messages[i], i) for i in range(start, end)]
+    logger.debug("Upstream error message window: %s", json.dumps(window, ensure_ascii=False))
 
 
 async def handle_chat_completion(
@@ -428,8 +779,19 @@ async def handle_chat_completion(
     openai_body = adapter.convert_chat_request(body)
     source_provider = type(adapter).__name__.removesuffix("Adapter").lower()
     openai_body["model"] = _apply_model_map(openai_body.get("model", ""))
+    logger.debug(
+        "Request reasoning inputs: source=%s requested_model=%s mapped_model=%s thinking=%s output_config=%s converted_thinking=%s",
+        source_provider,
+        body.get("model", ""),
+        openai_body.get("model", ""),
+        body.get("thinking"),
+        body.get("output_config"),
+        openai_body.get("_copilot_adapter_thinking"),
+    )
     requested_model = openai_body.get("model", "")
-    openai_body = _normalize_request_params(openai_body, source_provider, requested_model)
+    openai_body = _normalize_request_params(
+        openai_body, source_provider, requested_model, endpoint="chat_completions"
+    )
 
     client = await account_mgr.get_client(initiator=resolved)
 
@@ -486,7 +848,7 @@ async def handle_chat_completion(
                                 converter = adapter.create_stream_converter(body)
                                 needs_retry = True
                                 break
-                        _debug_error(body, line)
+                        _debug_error(body, line, upstream_body=openai_body)
                         yield converter.format_error(line)
                         return
 
@@ -573,11 +935,30 @@ async def handle_chat_completion(
                 # Pure web_search — execute server-side and continue
                 web_search_iterations += 1
                 logger.debug("Intercepting %d web_search call(s) (iteration %d/%d)", len(web_calls), web_search_iterations, _web_search_max_iterations)
-                search_results = await _execute_web_search_calls(web_calls)
+                search_results, raw_data = await _execute_web_search_calls(web_calls)
+
+                # For Anthropic clients, emit native server_tool_use +
+                # web_search_tool_result content blocks so the client can
+                # display structured search results.
+                if source_provider == "anthropic":
+                    # Close any open block from pre-tool-call content
+                    if converter._block_started:
+                        yield converter._event("content_block_stop", {
+                            "type": "content_block_stop",
+                            "index": converter._block_index,
+                        })
+                        converter._block_started = False
+                        converter._block_index += 1
+
+                    for query, raw_results in raw_data:
+                        yield _build_web_search_sse_events(
+                            query, raw_results, converter._block_index,
+                        )
+                        converter._block_index += 2
 
                 assistant_msg = {
                     "role": "assistant",
-                    "content": _extract_text_from_stream(buffered_lines) or None,
+                    "content": _extract_text_from_stream(buffered_lines) or "",
                     "tool_calls": tool_calls,
                 }
                 openai_body["messages"].append(assistant_msg)
@@ -585,7 +966,10 @@ async def handle_chat_completion(
 
                 logger.info("Continuing after web_search (messages: %d)",
                             len(openai_body["messages"]))
-                converter = adapter.create_stream_converter(body)
+                # Reuse the existing converter — it already emitted
+                # message_start to the client.  Creating a fresh one would
+                # produce a duplicate message_start that breaks the
+                # Anthropic SSE protocol.
                 continue
 
         return StreamingResponse(
@@ -604,7 +988,7 @@ async def handle_chat_completion(
 
         if resp.status_code != 200:
             logger.error("API error %s: %s", resp.status_code, resp.text)
-            _debug_error(body, resp.text)
+            _debug_error(body, resp.text, upstream_body=openai_body)
             try:
                 content = resp.json()
             except Exception:
@@ -638,13 +1022,15 @@ async def handle_chat_completion(
 
     # Loop: intercept pure web_search calls, re-query until no more (max _web_search_max_iterations)
     web_search_iterations = 0
+    all_raw_data: list[tuple[str, list[dict]]] = []
     while web_calls and not non_web and web_search_iterations < _web_search_max_iterations:
         web_search_iterations += 1
         logger.info("Intercepting %d web_search call(s) (non-streaming, iteration %d/%d)", len(web_calls), web_search_iterations, _web_search_max_iterations)
-        search_results = await _execute_web_search_calls(tool_calls)
+        search_results, raw_data = await _execute_web_search_calls(tool_calls)
+        all_raw_data.extend(raw_data)
         openai_body["messages"].append({
             "role": "assistant",
-            "content": message.get("content"),
+            "content": message.get("content") or "",
             "tool_calls": tool_calls,
         })
         openai_body["messages"].extend(search_results)
@@ -666,10 +1052,122 @@ async def handle_chat_completion(
         web_calls = [tc for tc in tool_calls if tc.get("function", {}).get("name") == "web_search"]
         non_web = [tc for tc in tool_calls if tc.get("function", {}).get("name") != "web_search"]
 
+    anthropic_resp = adapter.convert_chat_response(resp_data, body)
+
+    # For Anthropic clients: prepend server_tool_use + web_search_tool_result
+    # content blocks so the client can display structured search results.
+    if source_provider == "anthropic" and all_raw_data:
+        web_blocks: list[dict] = []
+        for query, raw_results in all_raw_data:
+            blocks, _ = _build_web_search_content_blocks(query, raw_results)
+            web_blocks.extend(blocks)
+        anthropic_resp["content"] = web_blocks + anthropic_resp.get("content", [])
+
     return JSONResponse(
-        content=adapter.convert_chat_response(resp_data, body),
+        content=anthropic_resp,
         status_code=resp.status_code,
     )
+
+
+async def handle_native_anthropic_messages(
+    body: dict, *, request: Request | None = None, initiator: str | None = None,
+):
+    """Proxy Anthropic Messages requests directly to the upstream Anthropic API."""
+    upstream_body = _sanitize_native_anthropic_body(body)
+    resolved = initiator or anthropic_adapter.infer_initiator(upstream_body)
+    requested_model = upstream_body.get("model", "")
+    query = request.url.query if request else None
+
+    client = await account_mgr.get_client(initiator=resolved)
+
+    if _free_within_minutes is not None and resolved == "user":
+        elapsed = await account_mgr.get_minutes_since_last_request(client)
+        if elapsed is not None and elapsed < _free_within_minutes:
+            resolved = "agent"
+            logger.info("free-within-minutes: last request %.1f min ago < %.1f → agent",
+                        elapsed, _free_within_minutes)
+
+    account = account_mgr.get_username(client)
+    billed_status = "yes" if resolved == "user" else "no"
+    logger.info(
+        "Anthropic native messages requested by %s (billed: %s, model: %s, account: %s)",
+        resolved, billed_status, requested_model, account,
+    )
+
+    if upstream_body.get("stream"):
+        converter = anthropic_adapter.create_stream_converter(upstream_body)
+
+        async def event_stream():
+            nonlocal client
+            while True:
+                needs_retry = False
+                recorded = False
+                async for line in client.stream_messages(
+                    upstream_body, initiator=resolved, query=query,
+                ):
+                    if request and await request.is_disconnected():
+                        return
+                    if line.startswith("error:"):
+                        if _is_rate_limit_error(line):
+                            logger.warning("Rate limited on account, switching account")
+                            fallback = await account_mgr.get_fallback_client(client)
+                            if fallback is not None:
+                                client = fallback
+                                needs_retry = True
+                                break
+                        _debug_error(body, line, upstream_body=upstream_body)
+                        yield converter.format_error(line)
+                        return
+                    if not recorded and line:
+                        recorded = True
+                        if not _force_free and resolved == "user":
+                            await account_mgr.record_usage(client, requested_model)
+                        await account_mgr.record_request_time(client)
+                    result = _passthrough_sse_line(line)
+                    if result:
+                        yield result
+                if not needs_retry:
+                    return
+
+        return StreamingResponse(
+            event_stream(), media_type="text/event-stream", headers=_STREAM_HEADERS,
+        )
+
+    while True:
+        resp = await client.messages(upstream_body, initiator=resolved, query=query)
+        if resp.status_code == 429:
+            logger.warning("Rate limited on account, switching account")
+            fallback = await account_mgr.get_fallback_client(client)
+            if fallback is not None:
+                client = fallback
+                continue
+
+        if resp.status_code != 200:
+            logger.error("API error %s: %s", resp.status_code, resp.text)
+            _debug_error(body, resp.text, upstream_body=upstream_body)
+            try:
+                content = resp.json()
+            except Exception:
+                content = {"error": {"message": resp.text}}
+            return JSONResponse(content=content, status_code=resp.status_code)
+
+        resp_data = resp.json()
+        resp_model = resp_data.get("model", "")
+        if resp_model and not _is_model_match(requested_model, resp_model):
+            logger.warning(
+                "Model mismatch: requested %s, got %s — quota likely exhausted, switching account",
+                requested_model, resp_model,
+            )
+            fallback = await account_mgr.get_fallback_client(client)
+            if fallback is not None:
+                client = fallback
+                continue
+        break
+
+    if not _force_free and resolved == "user":
+        await account_mgr.record_usage(client, requested_model)
+    await account_mgr.record_request_time(client)
+    return JSONResponse(content=resp_data, status_code=resp.status_code)
 
 
 # ---------------------------------------------------------------------------
@@ -709,8 +1207,23 @@ async def chat_completions(request: Request):
 async def responses(request: Request):
     body = await request.json()
     initiator = _get_initiator(request) or "user"
-    body["model"] = _apply_model_map(body.get("model", ""))
+    original_model = body.get("model", "")
+    body["model"] = _apply_model_map(original_model)
     requested_model = body.get("model", "")
+    logger.debug(
+        "Responses reasoning inputs: requested_model=%s mapped_model=%s thinking=%s output_config=%s reasoning=%s reasoning_effort=%s",
+        original_model,
+        requested_model,
+        body.get("thinking"),
+        body.get("output_config"),
+        body.get("reasoning"),
+        body.get("reasoning_effort"),
+    )
+    if "thinking" in body:
+        body["_copilot_adapter_thinking"] = body.pop("thinking")
+        body = _normalize_request_params(
+            body, "anthropic", requested_model, endpoint="responses"
+        )
 
     client = await account_mgr.get_client(initiator=initiator)
 
@@ -747,7 +1260,7 @@ async def responses(request: Request):
                                 converter = openai_adapter.create_stream_converter(body)
                                 needs_retry = True
                                 break
-                        _debug_error(body, line)
+                        _debug_error(body, line, upstream_body=body)
                         yield converter.format_error(line)
                         return
                     if first_chunk:
@@ -792,7 +1305,7 @@ async def responses(request: Request):
 
         if resp.status_code != 200:
             logger.error("API error %s: %s", resp.status_code, resp.text)
-            _debug_error(body, resp.text)
+            _debug_error(body, resp.text, upstream_body=body)
             try:
                 content = resp.json()
             except Exception:
@@ -845,7 +1358,7 @@ async def embeddings(request: Request):
         content = {"error": {"message": resp.text}}
     if resp.status_code != 200:
         logger.error("API error %s: %s", resp.status_code, resp.text)
-        _debug_error(body, resp.text)
+        _debug_error(body, resp.text, upstream_body=body)
     return JSONResponse(content=content, status_code=resp.status_code)
 
 
@@ -882,6 +1395,15 @@ async def count_tokens(request: Request):
 @app.post("/messages")
 async def messages(request: Request):
     body = await request.json()
+    mapped_model = _apply_model_map(body.get("model", ""))
+    if (
+        _should_use_native_anthropic_api("anthropic", mapped_model)
+        and not _anthropic_has_interceptable_web_search(body)
+    ):
+        body["model"] = mapped_model
+        return await handle_native_anthropic_messages(
+            body, request=request, initiator=_get_initiator(request)
+        )
     return await handle_chat_completion(
         anthropic_adapter, body, request=request, initiator=_get_initiator(request)
     )
@@ -991,7 +1513,7 @@ async def gemini_stream_generate_content(model_id: str, request: Request):
                             converter = adapter.create_stream_converter(body)
                             needs_retry = True
                             break
-                    _debug_error(body, line)
+                    _debug_error(body, line, upstream_body=openai_body)
                     yield converter.format_error(line)
                     return
                 if first_chunk:
