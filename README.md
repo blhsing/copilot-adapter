@@ -14,7 +14,8 @@ Authenticates via a GitHub Personal Access Token (PAT) or GitHub's device flow, 
 - [**Forward proxy mode**](#forward-proxy-mode) — Acts as an HTTP/HTTPS proxy that intercepts Copilot API traffic and rewrites billing headers, and transparently reroutes requests for OpenAI, Anthropic, and Gemini APIs through Copilot
 - [**One-command tool setup**](#tool-configuration) — Automatically configure popular agentic coding tools (Claude Code, Codex, Gemini CLI, OpenCode) to use this proxy, with easy revert to defaults
 - [**Configurable model mapping**](#model-mapping) — Glob-pattern-based model name rewriting, with sensible defaults for Claude models
-- [**Server-side web search**](#server-side-web-search) — Converts Anthropic's built-in `web_search` tool type to a function tool and intercepts it server-side via DuckDuckGo; strips other unsupported built-in types
+- [**Cross-provider reasoning effort mapping**](#parameter-compatibility) — Preserves Anthropic thinking / `output_config.effort` when requests are mapped to OpenAI-style models, including Responses-only targets like `gpt-5.4`
+- [**Server-side web search**](#server-side-web-search) — Converts Anthropic's built-in `web_search` tool type to a function tool, intercepts it server-side via DuckDuckGo, and returns Anthropic-native structured search results to Anthropic clients; strips other unsupported built-in types
 - **Streaming support** — Full SSE streaming across all three formats, including real-time format translation
 - [**Flexible authentication**](#authentication) — Supports multiple GitHub PATs, environment variables, cached tokens, and interactive device-flow OAuth, with automatic fallback
 - **Multi-worker support** — Spawns multiple worker processes for higher throughput
@@ -400,6 +401,15 @@ To override, use any of these methods (highest precedence first):
 
 Any override replaces the shipped defaults entirely. Model mapping is applied to all endpoints (chat completions, responses, embeddings, Gemini).
 
+For Anthropic `/v1/messages` requests, the adapter also uses the final mapped model to choose the upstream Copilot endpoint:
+
+- **Anthropic target** (for example `claude-sonnet-4.6`) — proxied natively to Anthropic Messages
+- **Responses-only OpenAI target** (for example `gpt-5.4`) — converted to OpenAI `/v1/responses`
+- **Other OpenAI-compatible targets** — converted to `/v1/chat/completions`
+
+This preserves Anthropic features like thinking / `output_config.effort` when a Claude client is mapped to a Responses-only OpenAI model.
+
+
 ## Authentication
 
 ### API token protection
@@ -501,7 +511,12 @@ export GEMINI_API_BASE=http://127.0.0.1:18080/v1beta
 
 ## Server-side web search
 
-When a model responds with a `web_search` tool call, the adapter intercepts it and executes the search server-side using [DuckDuckGo](https://github.com/deedy5/ddgs) (`ddgs` package). The search results are injected back into the conversation and the model continues generating a response — the client never sees the intermediate tool call.
+When a model responds with a `web_search` tool call, the adapter intercepts it and executes the search server-side using [DuckDuckGo](https://github.com/deedy5/ddgs) (`ddgs` package). The search results are injected back into the conversation and the model continues generating a response.
+
+For Anthropic clients, the adapter also emits Anthropic-native `server_tool_use` and `web_search_tool_result` content blocks so clients such as Claude Code can render structured web-search results instead of only seeing plain-text continuation output.
+
+For non-Anthropic clients, the client still does not see the intermediate tool call.
+
 
 This enables web search for any model routed through the adapter, even if the client doesn't support executing web search tool calls. It works with both streaming and non-streaming requests.
 
@@ -522,8 +537,14 @@ Anthropic clients (e.g. Claude Code) may send built-in tool types like `web_sear
 
 The proxy normalizes provider-specific request parameters after model mapping so cross-provider remaps keep working.
 
-- **Token limits** — Some targets require `max_completion_tokens` instead of `max_tokens` (for example, OpenAI GPT and o-series models). The proxy automatically uses the correct field based on the final mapped model name: `max_tokens` for Claude and Gemini targets, `max_completion_tokens` for OpenAI-style targets.
+- **Token limits** — Some targets require different token-limit fields and minimums. The proxy automatically uses the correct field based on the final mapped model and endpoint: `max_tokens` for Claude and Gemini targets, `max_completion_tokens` for OpenAI chat-completions targets, and `max_output_tokens` for OpenAI Responses targets. For Responses targets, very small Anthropic `max_tokens` values are raised to the upstream minimum when required.
 - **Reasoning / thinking effort** — When an Anthropic request includes thinking settings and is mapped to an OpenAI-style target, the proxy converts that intent to the nearest OpenAI reasoning effort. For example, Claude Code effort `max` mapped to `gpt-5.4` becomes reasoning effort `xhigh`.
+- **Endpoint selection for mapped Anthropic requests** — Anthropic `/v1/messages` requests are routed to the upstream endpoint required by the mapped target model, so Responses-only models such as `gpt-5.4` keep reasoning effort and tool support instead of falling back to `/v1/chat/completions`.
+
+Examples:
+- Anthropic `output_config.effort: high` → OpenAI `reasoning_effort: high`
+- Anthropic `output_config.effort: max` → OpenAI `reasoning_effort: xhigh`
+- Anthropic client mapped to `gpt-5.4` → upstream `/v1/responses`
 
 This normalization is based on the final mapped model, so it works even when model mapping redirects requests across providers.
 
@@ -531,7 +552,7 @@ This normalization is based on the final mapped model, so it works even when mod
 
 Run `python copilot_adapter.py serve` and visit `http://127.0.0.1:18080/v1/models` to see all models available through your Copilot subscription. Models include offerings from OpenAI, Anthropic, Google, and xAI.
 
-Note: some newer models (e.g. `gpt-5.4`) only support the `/v1/responses` endpoint, not `/v1/chat/completions`.
+Note: some newer models (e.g. `gpt-5.4`) only support the `/v1/responses` endpoint, not `/v1/chat/completions`. The adapter handles this automatically for Anthropic `/v1/messages` requests after model mapping.
 
 ## Tests
 
@@ -564,7 +585,7 @@ Tests use the cheapest available models (`gpt-4o-mini` for chat, `gpt-5-mini` fo
 1. **Device flow OAuth** authenticates with GitHub and stores tokens in `~/.config/copilot-adapter/tokens.json`
 2. GitHub tokens are exchanged for short-lived Copilot API tokens via `api.github.com/copilot_internal/v2/token`, automatically refreshed every ~25 minutes with concurrent-access protection (double-checked locking ensures only one refresh happens at a time)
 3. For multi-account setups, the `AccountManager` selects which account to use based on the configured rotation strategy, sticking to the same account for agent-initiated follow-ups
-4. Incoming requests are translated (if needed) to the format Copilot expects, model names are rewritten via the configurable model map, and requests are proxied to `api.githubcopilot.com` with responses translated back to the client's expected format
+4. Incoming requests are translated (if needed) to the format Copilot expects, model names are rewritten via the configurable model map, the correct upstream endpoint is selected (`/v1/messages`, `/v1/chat/completions`, or `/v1/responses`), and responses are translated back to the client's expected format
 5. In forward proxy mode (`--proxy`), the server also accepts `CONNECT` tunnels on the same port — traffic to `api.githubcopilot.com` is MITM'd to rewrite billing headers, traffic to OpenAI/Anthropic/Gemini APIs is redirected to the local adapter, and all other traffic is tunneled transparently
 
 ## Known issues

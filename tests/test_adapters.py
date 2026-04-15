@@ -9,6 +9,11 @@ import json
 import pytest
 
 from lib.adapters import AnthropicAdapter, GeminiAdapter, OpenAIAdapter
+from lib.adapters.anthropic import (
+    _anthropic_to_responses,
+    _AnthropicResponsesStreamConverter,
+    _responses_to_anthropic,
+)
 from lib.client import CopilotClient
 from lib.server import (
     _anthropic_has_interceptable_web_search,
@@ -16,12 +21,16 @@ from lib.server import (
     _build_web_search_sse_events,
     _execute_web_search_calls,
     _extract_error_message_index,
+    _extract_model_from_responses_sse,
+    _extract_text_from_responses_stream,
+    _extract_tool_calls_from_responses_stream,
     _extract_tool_calls_from_stream,
     _is_model_match,
     _message_debug_outline,
     _normalize_request_params,
     _sanitize_native_anthropic_body,
     _should_use_native_anthropic_api,
+    _should_use_responses_api,
 )
 
 
@@ -578,6 +587,453 @@ class TestAnthropicAdapter:
         err = converter.format_error("error: 429 rate limited")
         assert err.startswith("event: error\n")
         assert "429" in err
+
+
+# ===================================================================
+# Anthropic → Responses API conversion
+# ===================================================================
+
+class TestAnthropicToResponses:
+    def test_simple_user_message(self):
+        body = {
+            "model": "claude-opus-4-6",
+            "max_tokens": 100,
+            "messages": [{"role": "user", "content": "Hello"}],
+        }
+        result = _anthropic_to_responses(body)
+        assert result["model"] == "claude-opus-4-6"
+        assert result["max_output_tokens"] == 100
+        assert "max_tokens" not in result
+        assert len(result["input"]) == 1
+        assert result["input"][0] == {"role": "user", "content": "Hello"}
+
+    def test_max_tokens_is_clamped_for_responses_api_minimum(self):
+        body = {
+            "model": "claude-opus-4-6",
+            "max_tokens": 1,
+            "messages": [{"role": "user", "content": "quota"}],
+        }
+        result = _anthropic_to_responses(body)
+        assert result["max_output_tokens"] == 16
+
+    def test_system_becomes_developer(self):
+        body = {
+            "model": "test",
+            "max_tokens": 10,
+            "system": "You are helpful.",
+            "messages": [{"role": "user", "content": "Hi"}],
+        }
+        result = _anthropic_to_responses(body)
+        assert result["input"][0] == {"role": "developer", "content": "You are helpful."}
+        assert result["input"][1] == {"role": "user", "content": "Hi"}
+
+    def test_system_block_array(self):
+        body = {
+            "model": "test",
+            "max_tokens": 10,
+            "system": [{"type": "text", "text": "Part A"}, {"type": "text", "text": "Part B"}],
+            "messages": [{"role": "user", "content": "Hi"}],
+        }
+        result = _anthropic_to_responses(body)
+        assert result["input"][0]["content"] == "Part A\nPart B"
+
+    def test_tool_use_becomes_function_call(self):
+        body = {
+            "model": "test",
+            "max_tokens": 10,
+            "messages": [
+                {"role": "assistant", "content": [
+                    {"type": "text", "text": "Let me check."},
+                    {"type": "tool_use", "id": "toolu_123", "name": "Read", "input": {"path": "foo.txt"}},
+                ]},
+            ],
+        }
+        result = _anthropic_to_responses(body)
+        items = result["input"]
+        # Should produce: assistant message + function_call
+        assert items[0]["type"] == "message"
+        assert items[0]["role"] == "assistant"
+        assert items[0]["content"][0]["type"] == "output_text"
+        assert items[0]["content"][0]["text"] == "Let me check."
+        assert items[1]["type"] == "function_call"
+        assert items[1]["name"] == "Read"
+        assert items[1]["call_id"] == "toolu_123"
+        assert '"path"' in items[1]["arguments"]
+
+    def test_tool_result_becomes_function_call_output(self):
+        body = {
+            "model": "test",
+            "max_tokens": 10,
+            "messages": [
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "toolu_abc", "name": "Read", "input": {"path": "f"}},
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_abc", "content": "file contents"},
+                ]},
+            ],
+        }
+        result = _anthropic_to_responses(body)
+        items = result["input"]
+        assert items[0]["type"] == "function_call"
+        assert items[0]["call_id"] == "toolu_abc"
+        assert items[1]["type"] == "function_call_output"
+        assert items[1]["call_id"] == "toolu_abc"
+        assert items[1]["output"] == "file contents"
+
+    def test_tool_result_with_interleaved_text(self):
+        body = {
+            "model": "test",
+            "max_tokens": 10,
+            "messages": [
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "toolu_1", "name": "Read", "input": {}},
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_1", "content": "result"},
+                    {"type": "text", "text": "Now do something else"},
+                ]},
+            ],
+        }
+        result = _anthropic_to_responses(body)
+        items = result["input"]
+        # function_call, function_call_output, user text
+        assert items[0]["type"] == "function_call"
+        assert items[1]["type"] == "function_call_output"
+        assert items[2]["role"] == "user"
+        assert items[2]["content"] == "Now do something else"
+
+    def test_tools_converted(self):
+        body = {
+            "model": "test",
+            "max_tokens": 10,
+            "messages": [{"role": "user", "content": "Hi"}],
+            "tools": [
+                {"name": "Read", "description": "Read file", "input_schema": {"type": "object"}},
+                {"type": "web_search_20250305", "name": "web_search"},
+            ],
+        }
+        result = _anthropic_to_responses(body)
+        assert len(result["tools"]) == 2
+        assert result["tools"][0]["name"] == "Read"
+        assert result["tools"][0]["type"] == "function"
+        assert "function" not in result["tools"][0]  # flat format, not nested
+        assert result["tools"][1]["name"] == "web_search"
+
+    def test_tool_choice_mapping(self):
+        body = {
+            "model": "test",
+            "max_tokens": 10,
+            "messages": [{"role": "user", "content": "Hi"}],
+            "tools": [{"name": "Read", "description": "", "input_schema": {}}],
+            "tool_choice": {"type": "any"},
+        }
+        result = _anthropic_to_responses(body)
+        assert result["tool_choice"] == "required"
+
+    def test_thinking_passthrough(self):
+        body = {
+            "model": "test",
+            "max_tokens": 10,
+            "messages": [{"role": "user", "content": "Hi"}],
+            "thinking": {"type": "adaptive"},
+            "output_config": {"effort": "high"},
+        }
+        result = _anthropic_to_responses(body)
+        assert result["_copilot_adapter_thinking"] == {"type": "adaptive"}
+        assert result["_copilot_adapter_output_effort"] == "high"
+
+    def test_image_content(self):
+        body = {
+            "model": "test",
+            "max_tokens": 10,
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": "What's this?"},
+                {"type": "image", "source": {
+                    "type": "base64", "media_type": "image/png", "data": "abc123",
+                }},
+            ]}],
+        }
+        result = _anthropic_to_responses(body)
+        items = result["input"]
+        assert len(items) == 1
+        assert items[0]["role"] == "user"
+        assert isinstance(items[0]["content"], list)
+        assert items[0]["content"][0]["type"] == "input_text"
+        assert items[0]["content"][1]["type"] == "input_image"
+        assert items[0]["content"][1]["image_url"] == "data:image/png;base64,abc123"
+
+    def test_optional_params(self):
+        body = {
+            "model": "test",
+            "max_tokens": 10,
+            "messages": [{"role": "user", "content": "Hi"}],
+            "temperature": 0.5,
+            "top_p": 0.9,
+            "stop_sequences": ["END"],
+            "stream": True,
+        }
+        result = _anthropic_to_responses(body)
+        assert result["temperature"] == 0.5
+        assert result["top_p"] == 0.9
+        assert result["stop"] == ["END"]
+        assert result["stream"] is True
+
+
+class TestResponsesToAnthropic:
+    def test_text_response(self):
+        resp = {
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Hello!"}],
+            }],
+            "status": "completed",
+            "usage": {"input_tokens": 10, "output_tokens": 5},
+        }
+        result = _responses_to_anthropic(resp, "gpt-5.4")
+        assert result["type"] == "message"
+        assert result["role"] == "assistant"
+        assert result["model"] == "gpt-5.4"
+        assert len(result["content"]) == 1
+        assert result["content"][0] == {"type": "text", "text": "Hello!"}
+        assert result["stop_reason"] == "end_turn"
+        assert result["usage"] == {"input_tokens": 10, "output_tokens": 5}
+
+    def test_function_call_response(self):
+        resp = {
+            "output": [{
+                "type": "function_call",
+                "call_id": "call_123",
+                "name": "Read",
+                "arguments": '{"path": "foo.txt"}',
+            }],
+            "status": "completed",
+            "usage": {"input_tokens": 10, "output_tokens": 20},
+        }
+        result = _responses_to_anthropic(resp, "gpt-5.4")
+        assert result["stop_reason"] == "tool_use"
+        assert len(result["content"]) == 1
+        tc = result["content"][0]
+        assert tc["type"] == "tool_use"
+        assert tc["id"] == "call_123"
+        assert tc["name"] == "Read"
+        assert tc["input"] == {"path": "foo.txt"}
+
+    def test_mixed_text_and_function_call(self):
+        resp = {
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Let me check."}],
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_456",
+                    "name": "Read",
+                    "arguments": "{}",
+                },
+            ],
+            "status": "completed",
+            "usage": {"input_tokens": 5, "output_tokens": 15},
+        }
+        result = _responses_to_anthropic(resp, "gpt-5.4")
+        assert result["stop_reason"] == "tool_use"
+        assert len(result["content"]) == 2
+        assert result["content"][0]["type"] == "text"
+        assert result["content"][1]["type"] == "tool_use"
+
+    def test_incomplete_status(self):
+        resp = {
+            "output": [{"type": "message", "content": [{"type": "output_text", "text": "..."}]}],
+            "status": "incomplete",
+            "usage": {"input_tokens": 5, "output_tokens": 100},
+        }
+        result = _responses_to_anthropic(resp, "gpt-5.4")
+        assert result["stop_reason"] == "max_tokens"
+
+    def test_empty_output(self):
+        resp = {"output": [], "status": "completed", "usage": {}}
+        result = _responses_to_anthropic(resp, "gpt-5.4")
+        assert len(result["content"]) == 1
+        assert result["content"][0] == {"type": "text", "text": ""}
+
+
+class TestAnthropicResponsesStreamConverter:
+    def _make_sse(self, event_type: str, data: dict) -> list[str]:
+        """Build SSE lines for a Responses API event."""
+        return [f"event: {event_type}", f"data: {json.dumps(data)}"]
+
+    def test_text_flow(self):
+        converter = _AnthropicResponsesStreamConverter("gpt-5.4")
+        output = ""
+
+        # response.created
+        for line in self._make_sse("response.created", {
+            "type": "response.created",
+            "response": {"id": "resp_1", "model": "gpt-5.4", "output": []},
+        }):
+            output += converter.feed(line)
+
+        assert "message_start" in output
+
+        # content_part.added
+        for line in self._make_sse("response.content_part.added", {
+            "type": "response.content_part.added",
+            "output_index": 0, "content_index": 0,
+            "part": {"type": "output_text", "text": ""},
+        }):
+            output += converter.feed(line)
+
+        assert "content_block_start" in output
+
+        # text deltas
+        for line in self._make_sse("response.output_text.delta", {
+            "type": "response.output_text.delta",
+            "output_index": 0, "content_index": 0,
+            "delta": "Hello world",
+        }):
+            output += converter.feed(line)
+
+        assert "text_delta" in output
+        assert "Hello world" in output
+
+        # content_part.done
+        for line in self._make_sse("response.content_part.done", {
+            "type": "response.content_part.done",
+            "output_index": 0, "content_index": 0,
+            "part": {"type": "output_text", "text": "Hello world"},
+        }):
+            output += converter.feed(line)
+
+        assert "content_block_stop" in output
+
+        # completed
+        for line in self._make_sse("response.completed", {
+            "type": "response.completed",
+            "response": {
+                "id": "resp_1", "status": "completed",
+                "output": [{"type": "message", "content": [{"type": "output_text", "text": "Hello world"}]}],
+                "usage": {"input_tokens": 10, "output_tokens": 5},
+            },
+        }):
+            output += converter.feed(line)
+
+        assert "message_delta" in output
+        assert "message_stop" in output
+        assert "end_turn" in output
+
+    def test_function_call_flow(self):
+        converter = _AnthropicResponsesStreamConverter("gpt-5.4")
+        output = ""
+
+        # created
+        for line in self._make_sse("response.created", {
+            "type": "response.created",
+            "response": {"id": "resp_1", "model": "gpt-5.4"},
+        }):
+            output += converter.feed(line)
+
+        # function_call output_item.added
+        for line in self._make_sse("response.output_item.added", {
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": {
+                "type": "function_call",
+                "call_id": "call_abc",
+                "name": "Read",
+                "arguments": "",
+                "status": "in_progress",
+            },
+        }):
+            output += converter.feed(line)
+
+        assert "content_block_start" in output
+        assert "tool_use" in output
+        assert "Read" in output
+
+        # arguments delta
+        for line in self._make_sse("response.function_call_arguments.delta", {
+            "type": "response.function_call_arguments.delta",
+            "output_index": 0,
+            "delta": '{"path": "foo"}',
+        }):
+            output += converter.feed(line)
+
+        assert "input_json_delta" in output
+
+        # output_item.done (function_call)
+        for line in self._make_sse("response.output_item.done", {
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": {
+                "type": "function_call",
+                "call_id": "call_abc",
+                "name": "Read",
+                "arguments": '{"path": "foo"}',
+                "status": "completed",
+            },
+        }):
+            output += converter.feed(line)
+
+        assert "content_block_stop" in output
+
+        # completed
+        for line in self._make_sse("response.completed", {
+            "type": "response.completed",
+            "response": {
+                "id": "resp_1", "status": "completed",
+                "output": [{"type": "function_call", "name": "Read", "call_id": "call_abc", "arguments": '{"path": "foo"}'}],
+                "usage": {"input_tokens": 5, "output_tokens": 10},
+            },
+        }):
+            output += converter.feed(line)
+
+        assert "tool_use" in output  # stop_reason
+        assert "message_stop" in output
+
+    def test_error_formatting(self):
+        converter = _AnthropicResponsesStreamConverter("gpt-5.4")
+        err = converter.format_error("error: 500 internal")
+        assert err.startswith("event: error\n")
+        assert "500" in err
+
+
+class TestResponsesStreamHelpers:
+    def test_extract_tool_calls_from_responses_stream(self):
+        lines = [
+            'event: response.output_item.done',
+            'data: {"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","call_id":"call_1","name":"web_search","arguments":"{\\"query\\":\\"test\\"}"}}',
+            'event: response.output_item.done',
+            'data: {"type":"response.output_item.done","output_index":1,"item":{"type":"function_call","call_id":"call_2","name":"Read","arguments":"{\\"path\\":\\"f\\"}"}}',
+        ]
+        result = _extract_tool_calls_from_responses_stream(lines)
+        assert len(result) == 2
+        assert result[0]["name"] == "web_search"
+        assert result[0]["call_id"] == "call_1"
+        assert result[1]["name"] == "Read"
+
+    def test_extract_text_from_responses_stream(self):
+        lines = [
+            'event: response.output_text.delta',
+            'data: {"type":"response.output_text.delta","delta":"Hello "}',
+            'event: response.output_text.delta',
+            'data: {"type":"response.output_text.delta","delta":"world"}',
+        ]
+        result = _extract_text_from_responses_stream(lines)
+        assert result == "Hello world"
+
+    def test_extract_model_from_responses_sse(self):
+        line = 'data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.4"}}'
+        assert _extract_model_from_responses_sse(line) == "gpt-5.4"
+        assert _extract_model_from_responses_sse('data: {"type":"response.output_text.delta"}') is None
+        assert _extract_model_from_responses_sse('event: response.created') is None
+
+    def test_should_use_responses_api(self):
+        assert _should_use_responses_api("gpt-5.4") is True
+        assert _should_use_responses_api("gpt-4o") is False
+        assert _should_use_responses_api("claude-opus-4-6") is False
 
 
 # ===================================================================
