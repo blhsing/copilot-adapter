@@ -160,7 +160,9 @@ def _normalize_output_effort(effort: str | None) -> str | None:
     }.get(normalized)
 
 
-def _normalize_reasoning_params(openai_body: dict, source_provider: str, target_model: str) -> None:
+def _normalize_reasoning_params(
+    openai_body: dict, source_provider: str, target_model: str, *, endpoint: str = "chat_completions"
+) -> None:
     """Normalize cross-provider reasoning params for the mapped target model."""
     target_provider = _infer_provider_from_model(target_model)
 
@@ -168,18 +170,30 @@ def _normalize_reasoning_params(openai_body: dict, source_provider: str, target_
         thinking = openai_body.pop("_copilot_adapter_thinking", None)
         output_effort = openai_body.pop("_copilot_adapter_output_effort", None)
         effort = _normalize_output_effort(output_effort) or _normalize_thinking_to_effort(thinking)
-        logger.debug(
-            "Reasoning normalization: source=%s target=%s provider=%s thinking=%s output_effort=%s derived_effort=%s",
-            source_provider,
-            target_model,
-            target_provider,
-            thinking,
-            output_effort,
-            effort,
-        )
         if effort and target_provider == "openai":
             openai_body["reasoning_effort"] = effort
-        elif (thinking or output_effort) and not effort:
+        if output_effort:
+            logger.debug(
+                "Request normalization: source=%s target=%s endpoint=%s provider=%s output_effort=%s reasoning_effort=%s",
+                source_provider,
+                target_model,
+                endpoint,
+                target_provider,
+                output_effort,
+                openai_body.get("reasoning_effort"),
+            )
+        else:
+            logger.debug(
+                "Request normalization: source=%s target=%s endpoint=%s provider=%s thinking=%s reasoning_effort=%s",
+                source_provider,
+                target_model,
+                endpoint,
+                target_provider,
+                thinking,
+                openai_body.get("reasoning_effort"),
+            )
+
+        if (thinking or output_effort) and not effort:
             logger.debug(
                 "Reasoning normalization skipped: inputs did not map to effort (thinking=%s, output_effort=%s)",
                 thinking,
@@ -208,7 +222,7 @@ def _normalize_request_params(
 ) -> dict:
     """Normalize provider/model-specific params after model mapping."""
     _normalize_token_limit_params(openai_body, target_model)
-    _normalize_reasoning_params(openai_body, source_provider, target_model)
+    _normalize_reasoning_params(openai_body, source_provider, target_model, endpoint=endpoint)
     if "reasoning_effort" in openai_body:
         # Some models (e.g. gpt-5.4) reject reasoning_effort + function
         # tools in /v1/chat/completions (requires /v1/responses instead).
@@ -1261,15 +1275,6 @@ async def handle_anthropic_via_responses(
     resp_body = _anthropic_to_responses(body)
     resp_body["model"] = _apply_model_map(resp_body.get("model", ""))
     requested_model = resp_body.get("model", "")
-
-    logger.debug(
-        "Responses routing: source=anthropic requested_model=%s mapped_model=%s "
-        "thinking=%s output_config=%s",
-        body.get("model", ""),
-        requested_model,
-        body.get("thinking"),
-        body.get("output_config"),
-    )
 
     resp_body = _normalize_request_params(
         resp_body, "anthropic", requested_model, endpoint="responses",
