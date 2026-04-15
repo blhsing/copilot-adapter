@@ -518,6 +518,10 @@ Anthropic clients (e.g. Claude Code) may send built-in tool types like `web_sear
 - **`web_search_*`** — Converted to a `web_search` function tool and [intercepted server-side](#server-side-web-search)
 - **Other built-in types** (e.g. `text_editor_*`, `code_execution_*`) — Stripped from the request, since these are handled client-side and don't need to be sent to the model
 
+## Parameter compatibility
+
+The Copilot API requires `max_completion_tokens` instead of `max_tokens` for some models (e.g. OpenAI's GPT and o-series). When converting Anthropic requests, the adapter automatically uses the correct parameter based on the final mapped model name — `max_tokens` for Claude and Gemini models, `max_completion_tokens` for all others. This ensures requests work correctly even when model mapping redirects Claude-format requests to non-Claude models.
+
 ## Available models
 
 Run `python copilot_adapter.py serve` and visit `http://127.0.0.1:18080/v1/models` to see all models available through your Copilot subscription. Models include offerings from OpenAI, Anthropic, Google, and xAI.

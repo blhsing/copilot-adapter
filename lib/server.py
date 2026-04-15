@@ -63,6 +63,13 @@ def _is_model_match(requested: str, responded: str) -> bool:
     )
 
 
+def _uses_max_completion_tokens(model: str) -> bool:
+    """Return True if *model* requires ``max_completion_tokens`` instead of ``max_tokens``."""
+    name = model.lower()
+    # Claude and Gemini models use max_tokens; OpenAI and others use max_completion_tokens
+    return not (name.startswith("claude") or name.startswith("gemini"))
+
+
 def _extract_model_from_sse_line(line: str) -> str | None:
     """Try to extract the ``model`` field from an SSE data line."""
     if not line.startswith("data: "):
@@ -357,6 +364,10 @@ async def handle_chat_completion(
     openai_body = adapter.convert_chat_request(body)
     openai_body["model"] = _apply_model_map(openai_body.get("model", ""))
     requested_model = openai_body.get("model", "")
+
+    # Some models require max_completion_tokens instead of max_tokens
+    if "max_tokens" in openai_body and _uses_max_completion_tokens(requested_model):
+        openai_body["max_completion_tokens"] = openai_body.pop("max_tokens")
 
     client = await account_mgr.get_client(initiator=resolved)
 
@@ -879,6 +890,11 @@ async def gemini_stream_generate_content(model_id: str, request: Request):
     openai_body["model"] = _apply_model_map(openai_body.get("model", ""))
     openai_body["stream"] = True
     requested_model = openai_body.get("model", "")
+
+    # Some models require max_completion_tokens instead of max_tokens
+    if "max_tokens" in openai_body and _uses_max_completion_tokens(requested_model):
+        openai_body["max_completion_tokens"] = openai_body.pop("max_tokens")
+
     client = await account_mgr.get_client(initiator=resolved)
 
     # Time-based free override
