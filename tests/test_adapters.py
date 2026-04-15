@@ -10,7 +10,19 @@ import pytest
 
 from lib.adapters import AnthropicAdapter, GeminiAdapter, OpenAIAdapter
 from lib.client import CopilotClient
-from lib.server import _normalize_request_params
+from lib.server import (
+    _anthropic_has_interceptable_web_search,
+    _build_web_search_content_blocks,
+    _build_web_search_sse_events,
+    _execute_web_search_calls,
+    _extract_error_message_index,
+    _extract_tool_calls_from_stream,
+    _is_model_match,
+    _message_debug_outline,
+    _normalize_request_params,
+    _sanitize_native_anthropic_body,
+    _should_use_native_anthropic_api,
+)
 
 
 # ===================================================================
@@ -258,6 +270,306 @@ class TestAnthropicAdapter:
         assert "max_tokens" not in normalized
         assert normalized["reasoning_effort"] == "xhigh"
         assert "_copilot_adapter_thinking" not in normalized
+
+    def test_long_tool_ids_are_shortened_consistently(self):
+        adapter = AnthropicAdapter()
+        long_tool_id = "toolu_" + ("abc123" * 67)
+        anthropic_body = {
+            "model": "claude-opus-4-6",
+            "max_tokens": 10,
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [{
+                        "type": "tool_use",
+                        "id": long_tool_id,
+                        "name": "web_search",
+                        "input": {"query": "hello"},
+                    }],
+                },
+                {
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": long_tool_id,
+                        "content": "done",
+                    }],
+                },
+            ],
+        }
+
+        openai_body = adapter.convert_chat_request(anthropic_body)
+        tool_call_id = openai_body["messages"][0]["tool_calls"][0]["id"]
+
+        assert tool_call_id != long_tool_id
+        assert len(tool_call_id) <= 64
+        assert openai_body["messages"][1]["tool_call_id"] == tool_call_id
+
+    def test_tool_use_assistant_message_uses_empty_string_content(self):
+        adapter = AnthropicAdapter()
+        anthropic_body = {
+            "model": "claude-opus-4-6",
+            "max_tokens": 10,
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [{
+                        "type": "tool_use",
+                        "id": "toolu_123",
+                        "name": "Read",
+                        "input": {"file_path": "foo.txt"},
+                    }],
+                },
+            ],
+        }
+
+        openai_body = adapter.convert_chat_request(anthropic_body)
+
+        assert openai_body["messages"][0]["role"] == "assistant"
+        assert openai_body["messages"][0]["content"] == ""
+        assert openai_body["messages"][0]["tool_calls"][0]["function"]["name"] == "Read"
+
+    @pytest.mark.asyncio
+    async def test_execute_web_search_calls_returns_tool_message_content(self):
+        result, raw_data = await _execute_web_search_calls([{
+            "id": "call_123",
+            "function": {
+                "name": "web_search",
+                "arguments": json.dumps({"query": "Taipei weather today"}),
+            },
+        }])
+
+        assert len(result) == 1
+        assert result[0]["role"] == "tool"
+        assert result[0]["tool_call_id"] == "call_123"
+        assert result[0]["content"]
+        assert len(raw_data) == 1
+        assert raw_data[0][0] == "Taipei weather today"
+        assert len(raw_data[0][1]) > 0
+
+    def test_build_web_search_content_blocks(self):
+        raw_results = [
+            {"title": "Example", "href": "https://example.com", "body": "Test body"},
+        ]
+        blocks, tool_id = _build_web_search_content_blocks("test query", raw_results)
+        assert len(blocks) == 2
+        assert blocks[0]["type"] == "server_tool_use"
+        assert blocks[0]["name"] == "web_search"
+        assert blocks[0]["input"] == {"query": "test query"}
+        assert blocks[1]["type"] == "web_search_tool_result"
+        assert blocks[1]["tool_use_id"] == tool_id
+        assert len(blocks[1]["content"]) == 1
+        assert blocks[1]["content"][0]["url"] == "https://example.com"
+
+    def test_build_web_search_sse_events(self):
+        raw_results = [
+            {"title": "Example", "href": "https://example.com", "body": "Test body"},
+        ]
+        events = _build_web_search_sse_events("test query", raw_results, 0)
+        assert "server_tool_use" in events
+        assert "web_search_tool_result" in events
+        assert "web_search_result_delta" in events
+        assert "test query" in events
+        assert "https://example.com" in events
+        # Should have 6 events: 3 for server_tool_use + 3 for web_search_tool_result
+        assert events.count("event: ") == 6
+
+    def test_stream_tool_call_names_are_reassembled(self):
+        chunks = [
+            {
+                "choices": [{
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 1,
+                            "id": "call_123",
+                            "function": {"name": "web_"},
+                        }],
+                    },
+                }],
+            },
+            {
+                "choices": [{
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 1,
+                            "function": {
+                                "name": "search",
+                                "arguments": '{"query":"hel',
+                            },
+                        }],
+                    },
+                }],
+            },
+            {
+                "choices": [{
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 1,
+                            "function": {"arguments": 'lo"}'},
+                        }],
+                    },
+                }],
+            },
+        ]
+        lines = [f"data: {json.dumps(chunk)}" for chunk in chunks]
+
+        tool_calls = _extract_tool_calls_from_stream(lines)
+
+        assert len(tool_calls) == 1
+        assert tool_calls[0]["id"] == "call_123"
+        assert tool_calls[0]["function"]["name"] == "web_search"
+        assert tool_calls[0]["function"]["arguments"] == '{"query":"hello"}'
+
+    def test_stream_tool_calls_with_missing_names_are_discarded(self):
+        chunk = {
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 1,
+                        "id": "call_123",
+                        "function": {"arguments": "{}"},
+                    }],
+                },
+            }],
+        }
+        lines = [f"data: {json.dumps(chunk)}"]
+
+        assert _extract_tool_calls_from_stream(lines) == []
+
+    def test_extract_error_message_index(self):
+        response_body = {
+            "error": {
+                "message": "Invalid 'messages[154].tool_calls[1].function.name': empty string.",
+            },
+        }
+
+        assert _extract_error_message_index(response_body) == 154
+
+    def test_message_debug_outline_flags_empty_tool_names(self):
+        outline = _message_debug_outline(
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_123",
+                        "function": {"name": ""},
+                    },
+                    {
+                        "id": "call_4567",
+                        "function": {"name": "web_search"},
+                    },
+                ],
+            },
+            12,
+        )
+
+        assert outline["index"] == 12
+        assert outline["tool_call_count"] == 2
+        assert outline["empty_tool_names"] == [0]
+        assert outline["tool_id_lengths"] == [8, 9]
+
+    def test_native_anthropic_api_selection(self):
+        assert _should_use_native_anthropic_api("anthropic", "claude-opus-4.6") is True
+        assert _should_use_native_anthropic_api("anthropic", "gpt-5.4") is False
+        assert _should_use_native_anthropic_api("gemini", "claude-opus-4.6") is False
+
+    def test_model_match_dot_vs_dash_versions(self):
+        # Dot-separated requested vs dash-separated+date-suffix responded
+        assert _is_model_match("claude-haiku-4.5", "claude-haiku-4-5-20251001") is True
+        assert _is_model_match("claude-sonnet-4.6", "claude-sonnet-4-6-20260101") is True
+        assert _is_model_match("gpt-5.4", "gpt-5-4-2026") is True
+        # Exact matches still work
+        assert _is_model_match("claude-opus-4-6", "claude-opus-4-6") is True
+        # Date-suffix only (no dot)
+        assert _is_model_match("gpt-4o-mini", "gpt-4o-mini-2024-07-18") is True
+        # Different models must not match
+        assert _is_model_match("claude-haiku-4.5", "claude-sonnet-4.6") is False
+
+    def test_normalize_request_params_maps_anthropic_thinking_to_reasoning_effort(self):
+        openai_body = {
+            "model": "gpt-5.4",
+            "messages": [{"role": "user", "content": "hi"}],
+            "_copilot_adapter_thinking": {"budget_tokens": 12000},
+        }
+
+        normalized = _normalize_request_params(openai_body, "anthropic", "gpt-5.4")
+
+        assert normalized["reasoning_effort"] == "high"
+        assert "_copilot_adapter_thinking" not in normalized
+
+    def test_normalize_request_params_maps_anthropic_output_effort_to_reasoning_effort(self):
+        openai_body = {
+            "model": "gpt-5.4",
+            "messages": [{"role": "user", "content": "hi"}],
+            "_copilot_adapter_thinking": {"type": "adaptive"},
+            "_copilot_adapter_output_effort": "high",
+        }
+
+        normalized = _normalize_request_params(openai_body, "anthropic", "gpt-5.4")
+
+        assert normalized["reasoning_effort"] == "high"
+        assert "_copilot_adapter_thinking" not in normalized
+        assert "_copilot_adapter_output_effort" not in normalized
+
+    def test_normalize_request_params_strips_reasoning_effort_when_tools_present(self):
+        openai_body = {
+            "model": "gpt-5.4",
+            "messages": [{"role": "user", "content": "hi"}],
+            "_copilot_adapter_output_effort": "high",
+            "_copilot_adapter_thinking": {"type": "adaptive"},
+            "tools": [{"type": "function", "function": {"name": "Read"}}],
+        }
+
+        normalized = _normalize_request_params(
+            openai_body, "anthropic", "gpt-5.4", endpoint="chat_completions"
+        )
+
+        assert "reasoning_effort" not in normalized
+        assert "tools" in normalized
+
+    def test_normalize_request_params_keeps_reasoning_effort_with_tools_on_responses(self):
+        openai_body = {
+            "model": "gpt-5.4",
+            "messages": [{"role": "user", "content": "hi"}],
+            "_copilot_adapter_output_effort": "high",
+            "_copilot_adapter_thinking": {"type": "adaptive"},
+            "tools": [{"type": "function", "function": {"name": "Read"}}],
+        }
+
+        normalized = _normalize_request_params(
+            openai_body, "anthropic", "gpt-5.4", endpoint="responses"
+        )
+
+        assert normalized["reasoning_effort"] == "high"
+        assert "tools" in normalized
+
+    def test_sanitize_native_anthropic_body_drops_context_management(self):
+        body = {
+            "model": "claude-opus-4.6",
+            "messages": [{"role": "user", "content": "hi"}],
+            "thinking": {"type": "adaptive"},
+            "output_config": {"effort": "high"},
+            "context_management": {
+                "edits": [{"type": "clear_thinking_20251015", "keep": "all"}],
+            },
+        }
+
+        sanitized = _sanitize_native_anthropic_body(body)
+
+        assert "context_management" not in sanitized
+        assert sanitized["thinking"] == {"type": "adaptive"}
+        assert sanitized["output_config"] == {"effort": "high"}
+        assert "context_management" in body
+
+    def test_anthropic_has_interceptable_web_search(self):
+        assert _anthropic_has_interceptable_web_search({
+            "tools": [{"type": "web_search_20250305", "name": "web_search"}],
+        }) is True
+        assert _anthropic_has_interceptable_web_search({
+            "tools": [{"type": "function", "name": "Read"}],
+        }) is False
+        assert _anthropic_has_interceptable_web_search({"messages": []}) is False
 
     @pytest.mark.asyncio
     async def test_stream_error_formatting(self):

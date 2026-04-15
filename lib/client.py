@@ -36,12 +36,19 @@ class CopilotClient:
             "vscode-machineid": _MACHINE_ID,
         }
 
+    def _url(self, path: str, query: str | None = None) -> str:
+        """Build an upstream API URL, preserving an optional raw query string."""
+        url = f"{COPILOT_API}{path}"
+        if query:
+            return f"{url}?{query}"
+        return url
+
     async def chat_completions(
         self, body: dict, *, initiator: str = "user"
     ) -> httpx.Response:
         async with httpx.AsyncClient(timeout=120) as client:
             return await client.post(
-                f"{COPILOT_API}/chat/completions",
+                self._url("/chat/completions"),
                 headers=await self._headers(initiator),
                 json=body,
             )
@@ -53,7 +60,7 @@ class CopilotClient:
         async with httpx.AsyncClient(timeout=timeout) as client:
             async with client.stream(
                 "POST",
-                f"{COPILOT_API}/chat/completions",
+                self._url("/chat/completions"),
                 headers=await self._headers(initiator),
                 json=body,
             ) as response:
@@ -74,7 +81,7 @@ class CopilotClient:
     ) -> httpx.Response:
         async with httpx.AsyncClient(timeout=120) as client:
             return await client.post(
-                f"{COPILOT_API}/responses",
+                self._url("/responses"),
                 headers=await self._headers(initiator),
                 json=body,
             )
@@ -86,7 +93,7 @@ class CopilotClient:
         async with httpx.AsyncClient(timeout=timeout) as client:
             async with client.stream(
                 "POST",
-                f"{COPILOT_API}/responses",
+                self._url("/responses"),
                 headers=await self._headers(initiator),
                 json=body,
             ) as response:
@@ -105,7 +112,7 @@ class CopilotClient:
     async def list_models(self) -> httpx.Response:
         async with httpx.AsyncClient(timeout=30) as client:
             return await client.get(
-                f"{COPILOT_API}/models", headers=await self._headers()
+                self._url("/models"), headers=await self._headers()
             )
 
     async def embeddings(
@@ -113,7 +120,40 @@ class CopilotClient:
     ) -> httpx.Response:
         async with httpx.AsyncClient(timeout=60) as client:
             return await client.post(
-                f"{COPILOT_API}/embeddings",
+                self._url("/embeddings"),
                 headers=await self._headers(initiator),
                 json=body,
             )
+
+    async def messages(
+        self, body: dict, *, initiator: str = "user", query: str | None = None
+    ) -> httpx.Response:
+        async with httpx.AsyncClient(timeout=120) as client:
+            return await client.post(
+                self._url("/v1/messages", query),
+                headers=await self._headers(initiator),
+                json=body,
+            )
+
+    async def stream_messages(
+        self, body: dict, *, initiator: str = "user", query: str | None = None
+    ) -> AsyncIterator[str]:
+        timeout = httpx.Timeout(connect=30, read=600, write=30, pool=30)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            async with client.stream(
+                "POST",
+                self._url("/v1/messages", query),
+                headers=await self._headers(initiator),
+                json=body,
+            ) as response:
+                if response.status_code != 200:
+                    text = await response.aread()
+                    yield f"error: {response.status_code} {text.decode()}"
+                    return
+                try:
+                    async for line in response.aiter_lines():
+                        yield line
+                except httpx.RemoteProtocolError as e:
+                    yield f"error: 502 {e}"
+                except httpx.ReadTimeout as e:
+                    yield f"error: 504 {e}"

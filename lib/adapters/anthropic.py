@@ -1,5 +1,6 @@
 """Anthropic Messages API format adapter."""
 
+import hashlib
 import json
 import logging
 import uuid
@@ -9,11 +10,27 @@ from .base import FormatAdapter, StreamConverter
 logger = logging.getLogger(__name__)
 
 
+_MAX_OPENAI_TOOL_ID_LENGTH = 64
+
+
+def _normalize_openai_tool_id(tool_id: str) -> str:
+    """Keep tool IDs within upstream OpenAI-compatible provider limits."""
+    if len(tool_id) <= _MAX_OPENAI_TOOL_ID_LENGTH:
+        return tool_id
+    digest = hashlib.sha256(tool_id.encode("utf-8")).hexdigest()
+    return f"toolu_{digest[:_MAX_OPENAI_TOOL_ID_LENGTH - len('toolu_')]}"
+
+
+def _assistant_content_or_empty(text_parts: list[str]) -> str:
+    """Return assistant text content, using an empty string when omitted."""
+    return "\n".join(text_parts) if text_parts else ""
+
+
 # ---------------------------------------------------------------------------
 # Request conversion: Anthropic -> OpenAI
 # ---------------------------------------------------------------------------
 
-def _convert_content_blocks(blocks: list, role: str) -> list[dict]:
+def _convert_content_blocks(blocks: list, role: str, tool_id_map: dict[str, str]) -> list[dict]:
     messages = []
     text_parts = []
     openai_content_parts = []
@@ -40,8 +57,13 @@ def _convert_content_blocks(blocks: list, role: str) -> list[dict]:
             })
 
         elif btype == "tool_use":
+            original_tool_id = block["id"]
+            openai_tool_id = tool_id_map.setdefault(
+                original_tool_id,
+                _normalize_openai_tool_id(original_tool_id),
+            )
             pending_tool_calls.append({
-                "id": block["id"],
+                "id": openai_tool_id,
                 "type": "function",
                 "function": {
                     "name": block["name"],
@@ -52,7 +74,7 @@ def _convert_content_blocks(blocks: list, role: str) -> list[dict]:
         elif btype == "tool_result":
             # Flush pending tool calls before tool results
             if pending_tool_calls:
-                content_text = "\n".join(text_parts) if text_parts else None
+                content_text = _assistant_content_or_empty(text_parts)
                 messages.append({
                     "role": "assistant",
                     "content": content_text,
@@ -72,13 +94,16 @@ def _convert_content_blocks(blocks: list, role: str) -> list[dict]:
                 )
             messages.append({
                 "role": "tool",
-                "tool_call_id": block["tool_use_id"],
+                "tool_call_id": tool_id_map.get(
+                    block["tool_use_id"],
+                    _normalize_openai_tool_id(block["tool_use_id"]),
+                ),
                 "content": str(tool_content),
             })
 
     # Flush remaining content
     if pending_tool_calls:
-        content_text = "\n".join(text_parts) if text_parts else None
+        content_text = _assistant_content_or_empty(text_parts)
         messages.append({
             "role": "assistant",
             "content": content_text,
@@ -95,6 +120,7 @@ def _convert_content_blocks(blocks: list, role: str) -> list[dict]:
 
 def _anthropic_to_openai(body: dict) -> dict:
     messages = []
+    tool_id_map: dict[str, str] = {}
 
     model = body.get("model", "")
 
@@ -113,7 +139,7 @@ def _anthropic_to_openai(body: dict) -> dict:
         if isinstance(content, str):
             messages.append({"role": role, "content": content})
         elif isinstance(content, list):
-            messages.extend(_convert_content_blocks(content, role))
+            messages.extend(_convert_content_blocks(content, role, tool_id_map))
         else:
             messages.append({"role": role, "content": content})
 
@@ -127,6 +153,8 @@ def _anthropic_to_openai(body: dict) -> dict:
         result["max_tokens"] = body["max_tokens"]
     if "thinking" in body:
         result["_copilot_adapter_thinking"] = body["thinking"]
+    if isinstance(body.get("output_config"), dict) and body["output_config"].get("effort"):
+        result["_copilot_adapter_output_effort"] = body["output_config"]["effort"]
     if "temperature" in body:
         result["temperature"] = body["temperature"]
     if "top_p" in body:
