@@ -520,7 +520,12 @@ Anthropic clients (e.g. Claude Code) may send built-in tool types like `web_sear
 
 ## Parameter compatibility
 
-The Copilot API requires `max_completion_tokens` instead of `max_tokens` for some models (e.g. OpenAI's GPT and o-series). When converting Anthropic requests, the adapter automatically uses the correct parameter based on the final mapped model name — `max_tokens` for Claude and Gemini models, `max_completion_tokens` for all others. This ensures requests work correctly even when model mapping redirects Claude-format requests to non-Claude models.
+The proxy normalizes provider-specific request parameters after model mapping so cross-provider remaps keep working.
+
+- **Token limits** — Some targets require `max_completion_tokens` instead of `max_tokens` (for example, OpenAI GPT and o-series models). The proxy automatically uses the correct field based on the final mapped model name: `max_tokens` for Claude and Gemini targets, `max_completion_tokens` for OpenAI-style targets.
+- **Reasoning / thinking effort** — When an Anthropic request includes thinking settings and is mapped to an OpenAI-style target, the proxy converts that intent to the nearest OpenAI reasoning effort. For example, Claude Code effort `max` mapped to `gpt-5.4` becomes reasoning effort `xhigh`.
+
+This normalization is based on the final mapped model, so it works even when model mapping redirects requests across providers.
 
 ## Available models
 

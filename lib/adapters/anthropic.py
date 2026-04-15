@@ -125,6 +125,8 @@ def _anthropic_to_openai(body: dict) -> dict:
 
     if "max_tokens" in body:
         result["max_tokens"] = body["max_tokens"]
+    if "thinking" in body:
+        result["_copilot_adapter_thinking"] = body["thinking"]
     if "temperature" in body:
         result["temperature"] = body["temperature"]
     if "top_p" in body:
