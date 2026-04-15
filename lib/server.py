@@ -238,13 +238,6 @@ def _normalize_request_params(
                 target_model,
                 endpoint,
             )
-        else:
-            logger.debug(
-                "Model map compatibility: target=%s endpoint=%s reasoning_effort=%s",
-                target_model,
-                endpoint,
-                openai_body["reasoning_effort"],
-            )
     return openai_body
 
 

@@ -676,6 +676,7 @@ class DualModeServer:
                  proxy_user: str | None = None,
                  proxy_password: str | None = None,
                  uvicorn_log_level: str = "info",
+                 uvicorn_log_config: dict | None = None,
                  uvicorn_use_colors: bool = True,
                  timeout_graceful_shutdown: int = 5):
         self._asgi_app = asgi_app
@@ -683,6 +684,7 @@ class DualModeServer:
         self._port = port
         self._ca_dir = ca_dir
         self._uvicorn_log_level = uvicorn_log_level
+        self._uvicorn_log_config = uvicorn_log_config
         self._uvicorn_use_colors = uvicorn_use_colors
         self._timeout = timeout_graceful_shutdown
 
@@ -715,6 +717,7 @@ class DualModeServer:
             host=self._internal_host,
             port=self._internal_port,
             log_level=self._uvicorn_log_level,
+            log_config=self._uvicorn_log_config,
             timeout_graceful_shutdown=self._timeout,
             use_colors=self._uvicorn_use_colors,
         )

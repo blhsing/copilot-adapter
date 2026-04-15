@@ -157,6 +157,7 @@ Example `~/.config/copilot-adapter/config.json`:
   "port": 18080,
   "strategy": "max-usage",
   "plan": "pro",
+  "log_file": "/path/to/copilot-adapter.log",
   "free": false,
   "free_within_minutes": 5,
   "proxy": false,
@@ -203,6 +204,7 @@ All CLI options can be set via environment variables:
 | `--quota-limit` | `COPILOT_ADAPTER_QUOTA_LIMIT` | per plan |
 | `--plan` | `COPILOT_ADAPTER_PLAN` | `pro` |
 | `--log-level` | `COPILOT_ADAPTER_LOG_LEVEL` | `info` |
+| `--log-file` | `COPILOT_ADAPTER_LOG_FILE` | *(none)* |
 | `--free` | `COPILOT_ADAPTER_FREE` | *(off)* |
 | `--free-within-minutes` | `COPILOT_ADAPTER_FREE_WITHIN_MINUTES` | *(off)* |
 | `--proxy` | `COPILOT_ADAPTER_PROXY` | *(off)* |
@@ -214,6 +216,8 @@ All CLI options can be set via environment variables:
 | `--web-search-iterations` | `COPILOT_ADAPTER_WEB_SEARCH_ITERATIONS` | `3` |
 
 Set `NO_COLOR=1` to disable colored log output. Colors are auto-detected on Windows (requires Windows Terminal or VT-enabled console).
+
+Use `--log-file /path/to/copilot-adapter.log` (or `log_file` in the config file) to append the same logs to a file while keeping console output enabled.
 
 `GITHUB_TOKEN` is also accepted as a fallback for the GitHub token. Multiple tokens can be comma-separated in `COPILOT_ADAPTER_GITHUB_TOKEN` or `GITHUB_TOKEN`.
 
