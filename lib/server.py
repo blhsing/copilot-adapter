@@ -63,11 +63,75 @@ def _is_model_match(requested: str, responded: str) -> bool:
     )
 
 
-def _uses_max_completion_tokens(model: str) -> bool:
-    """Return True if *model* requires ``max_completion_tokens`` instead of ``max_tokens``."""
+def _infer_provider_from_model(model: str) -> str:
+    """Infer the provider family from a mapped model name."""
     name = model.lower()
-    # Claude and Gemini models use max_tokens; OpenAI and others use max_completion_tokens
-    return not (name.startswith("claude") or name.startswith("gemini"))
+    if name.startswith("claude"):
+        return "anthropic"
+    if name.startswith("gemini"):
+        return "gemini"
+    if (
+        name.startswith("gpt")
+        or name.startswith("o1")
+        or name.startswith("o3")
+        or name.startswith("o4")
+        or name.startswith("o")
+    ):
+        return "openai"
+    return "openai"
+
+
+def _target_prefers_max_completion_tokens(model: str) -> bool:
+    """Return True if *model* prefers ``max_completion_tokens`` instead of ``max_tokens``."""
+    return _infer_provider_from_model(model) == "openai"
+
+
+def _normalize_thinking_to_effort(thinking: dict) -> str | None:
+    """Convert source-provider thinking config to a canonical effort string."""
+    if not isinstance(thinking, dict):
+        return None
+    if thinking.get("type") == "disabled":
+        return None
+    budget = thinking.get("budget_tokens")
+    if not isinstance(budget, int) or budget <= 0:
+        return None
+    if budget >= 32000:
+        return "xhigh"
+    if budget >= 10000:
+        return "high"
+    if budget >= 4000:
+        return "medium"
+    return "low"
+
+
+def _normalize_reasoning_params(openai_body: dict, source_provider: str, target_model: str) -> None:
+    """Normalize cross-provider reasoning params for the mapped target model."""
+    target_provider = _infer_provider_from_model(target_model)
+
+    if source_provider == "anthropic":
+        thinking = openai_body.pop("_copilot_adapter_thinking", None)
+        effort = _normalize_thinking_to_effort(thinking)
+        if effort and target_provider == "openai":
+            openai_body["reasoning_effort"] = effort
+
+
+def _normalize_token_limit_params(openai_body: dict, target_model: str) -> None:
+    """Normalize token-limit params for the mapped target model."""
+    if "max_tokens" in openai_body and _target_prefers_max_completion_tokens(target_model):
+        openai_body["max_completion_tokens"] = openai_body.pop("max_tokens")
+
+
+def _normalize_request_params(openai_body: dict, source_provider: str, target_model: str) -> dict:
+    """Normalize provider/model-specific params after model mapping."""
+    _normalize_token_limit_params(openai_body, target_model)
+    _normalize_reasoning_params(openai_body, source_provider, target_model)
+    if "reasoning_effort" in openai_body:
+        logger.debug(
+            "Model map compatibility: target=%s reasoning_effort=%s",
+            target_model,
+            openai_body["reasoning_effort"],
+        )
+    return openai_body
 
 
 def _extract_model_from_sse_line(line: str) -> str | None:
@@ -362,12 +426,10 @@ async def handle_chat_completion(
 ):
     resolved = initiator or adapter.infer_initiator(body)
     openai_body = adapter.convert_chat_request(body)
+    source_provider = type(adapter).__name__.removesuffix("Adapter").lower()
     openai_body["model"] = _apply_model_map(openai_body.get("model", ""))
     requested_model = openai_body.get("model", "")
-
-    # Some models require max_completion_tokens instead of max_tokens
-    if "max_tokens" in openai_body and _uses_max_completion_tokens(requested_model):
-        openai_body["max_completion_tokens"] = openai_body.pop("max_tokens")
+    openai_body = _normalize_request_params(openai_body, source_provider, requested_model)
 
     client = await account_mgr.get_client(initiator=resolved)
 
@@ -890,10 +952,7 @@ async def gemini_stream_generate_content(model_id: str, request: Request):
     openai_body["model"] = _apply_model_map(openai_body.get("model", ""))
     openai_body["stream"] = True
     requested_model = openai_body.get("model", "")
-
-    # Some models require max_completion_tokens instead of max_tokens
-    if "max_tokens" in openai_body and _uses_max_completion_tokens(requested_model):
-        openai_body["max_completion_tokens"] = openai_body.pop("max_tokens")
+    openai_body = _normalize_request_params(openai_body, "gemini", requested_model)
 
     client = await account_mgr.get_client(initiator=resolved)
 

@@ -10,6 +10,7 @@ import pytest
 
 from lib.adapters import AnthropicAdapter, GeminiAdapter, OpenAIAdapter
 from lib.client import CopilotClient
+from lib.server import _normalize_request_params
 
 
 # ===================================================================
@@ -230,6 +231,33 @@ class TestAnthropicAdapter:
         resp = await client.chat_completions(openai_body)
         result = adapter.convert_chat_response(resp.json(), anthropic_body)
         assert "2" in result["content"][0]["text"]
+
+    def test_preserve_thinking_for_later_normalization(self):
+        adapter = AnthropicAdapter()
+        anthropic_body = {
+            "model": "claude-opus-4-6",
+            "max_tokens": 10,
+            "thinking": {"type": "enabled", "budget_tokens": 32000},
+            "messages": [{"role": "user", "content": "Hi."}],
+        }
+        openai_body = adapter.convert_chat_request(anthropic_body)
+        assert openai_body["_copilot_adapter_thinking"] == {
+            "type": "enabled",
+            "budget_tokens": 32000,
+        }
+
+    def test_normalize_anthropic_thinking_to_openai_reasoning(self):
+        openai_body = {
+            "model": "gpt-5.4",
+            "messages": [{"role": "user", "content": "Hi."}],
+            "max_tokens": 10,
+            "_copilot_adapter_thinking": {"type": "enabled", "budget_tokens": 32000},
+        }
+        normalized = _normalize_request_params(openai_body, "anthropic", "gpt-5.4")
+        assert normalized["max_completion_tokens"] == 10
+        assert "max_tokens" not in normalized
+        assert normalized["reasoning_effort"] == "xhigh"
+        assert "_copilot_adapter_thinking" not in normalized
 
     @pytest.mark.asyncio
     async def test_stream_error_formatting(self):
