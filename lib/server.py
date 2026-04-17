@@ -36,11 +36,32 @@ _DEFAULT_MODEL_MAP_FILE = Path(__file__).resolve().parent.parent / "model_map.js
 
 
 def load_default_model_map() -> list[tuple[str, str]]:
-    """Load the default model map from the shipped model_map.json file."""
+    """Load the default model map from the shipped model_map.json file.
+
+    Returns an empty list if no file is shipped. Claude models are normalized
+    in-code via ``_normalize_claude_model_id`` rather than via a default map.
+    """
     if _DEFAULT_MODEL_MAP_FILE.exists():
         data = json.loads(_DEFAULT_MODEL_MAP_FILE.read_text())
         return list(data.items())
     return []
+
+
+_CLAUDE_MODEL_ID_RE = re.compile(r"^(claude-[a-z]+-\d+)-(\d+)((?:-\d+)*)(.*)$")
+
+
+def _normalize_claude_model_id(model: str) -> str:
+    """Normalize Anthropic model IDs to the family-major.minor form Copilot uses.
+
+    ``claude-opus-4-6-20251025`` → ``claude-opus-4.6``
+    ``claude-opus-4-7`` → ``claude-opus-4.7``
+    Non-digit suffixes (e.g. ``-fast``) are preserved.
+    """
+    m = _CLAUDE_MODEL_ID_RE.match(model)
+    if not m:
+        return model
+    prefix, minor, _trailing_digits, rest = m.groups()
+    return f"{prefix}.{minor}{rest}"
 
 _STREAM_HEADERS = {
     "Cache-Control": "no-cache",
@@ -256,12 +277,17 @@ def _extract_model_from_sse_line(line: str) -> str | None:
 
 
 def _apply_model_map(model: str) -> str:
-    """Apply the configured model mapping to a model name."""
+    """Apply the configured model mapping, then Claude-family normalization."""
     for pattern, target in _model_map:
         if fnmatch(model, pattern):
             if model != target:
                 logger.debug("Model map: %s -> %s (pattern: %s)", model, target, pattern)
             return target
+    if model.startswith("claude-"):
+        normalized = _normalize_claude_model_id(model)
+        if normalized != model:
+            logger.debug("Model map: %s -> %s (claude normalization)", model, normalized)
+        return normalized
     return model
 
 

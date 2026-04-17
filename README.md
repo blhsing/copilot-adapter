@@ -13,7 +13,7 @@ Authenticates via a GitHub Personal Access Token (PAT) or GitHub's device flow, 
 - [**Three API formats**](#endpoints) — Serves OpenAI, Anthropic, and Gemini endpoints simultaneously
 - [**Forward proxy mode**](#forward-proxy-mode) — Acts as an HTTP/HTTPS proxy that intercepts Copilot API traffic and rewrites billing headers, and transparently reroutes requests for OpenAI, Anthropic, and Gemini APIs through Copilot
 - [**One-command tool setup**](#tool-configuration) — Automatically configure popular agentic coding tools (Claude Code, Codex, Gemini CLI, OpenCode) to use this proxy, with easy revert to defaults
-- [**Configurable model mapping**](#model-mapping) — Glob-pattern-based model name rewriting, with sensible defaults for Claude models
+- [**Configurable model mapping**](#model-mapping) — Built-in Claude model-ID normalization plus optional glob-pattern overrides
 - [**Cross-provider reasoning effort mapping**](#parameter-compatibility) — Preserves Anthropic thinking / `output_config.effort` when requests are mapped to OpenAI-style models, including Responses-only targets like `gpt-5.4`
 - [**Server-side web search**](#server-side-web-search) — Converts Anthropic's built-in `web_search` tool type to a function tool, intercepts it server-side via DuckDuckGo, and returns Anthropic-native structured search results to Anthropic clients; strips other unsupported built-in types
 - **Streaming support** — Full SSE streaming across all three formats, including real-time format translation
@@ -166,9 +166,7 @@ Example `~/.config/copilot-adapter/config.json`:
   "workers": 4,
   "cors_origins": ["*"],
   "model_map": {
-    "*sonnet*": "claude-sonnet-4.6",
-    "*opus*": "claude-opus-4.7",
-    "*haiku*": "claude-haiku-4.5"
+    "gpt-4-turbo": "gpt-4-0125-preview"
   },
   "api_tokens": ["sk-abc123...", "sk-def456..."],
   "web_search_iterations": 3,
@@ -209,7 +207,7 @@ All CLI options can be set via environment variables:
 | `--free-within-minutes` | `COPILOT_ADAPTER_FREE_WITHIN_MINUTES` | *(off)* |
 | `--proxy` | `COPILOT_ADAPTER_PROXY` | *(off)* |
 | `--ca-dir` | `COPILOT_ADAPTER_CA_DIR` | `~/.config/copilot-adapter` |
-| `--model-map` | `COPILOT_ADAPTER_MODEL_MAP` | shipped `model_map.json` |
+| `--model-map` | `COPILOT_ADAPTER_MODEL_MAP` | *(none — Claude IDs auto-normalized)* |
 | `--proxy-user` | `COPILOT_ADAPTER_PROXY_USER` | *(none)* |
 | `--proxy-password` | `COPILOT_ADAPTER_PROXY_PASSWORD` | *(none)* |
 | `--api-token` | `COPILOT_ADAPTER_API_TOKEN` | stored tokens |
@@ -363,31 +361,28 @@ This mode is useful when you want to transparently reduce premium billing for an
 
 ## Model mapping
 
-Model names in incoming requests are rewritten using configurable glob patterns before being sent to the Copilot API. This is necessary because Copilot uses dotted version numbers for Claude models (e.g. `claude-sonnet-4.6`) while clients like Claude Code send hyphenated names (e.g. `claude-sonnet-4-6`, `claude-3-5-sonnet-latest`). Without mapping, these requests fail with `model_not_supported`.
+Model names in incoming requests are rewritten before being sent to the Copilot API.
 
-The project ships with default mappings in `model_map.json`:
+**Built-in Claude normalization** — Copilot uses dotted version numbers for Claude models (e.g. `claude-opus-4.7`) while clients like Claude Code send hyphenated, date-suffixed names (e.g. `claude-opus-4-7-20260215`). The adapter always normalizes Claude model IDs automatically: the dash after the first major version becomes a dot, and trailing `-<digits>` segments are dropped. Non-digit suffixes (e.g. `-fast`) are preserved.
 
-```json
-{
-  "*sonnet*": "claude-sonnet-4.6",
-  "*opus*": "claude-opus-4.7",
-  "*haiku*": "claude-haiku-4.5"
-}
-```
+Examples:
+- `claude-opus-4-7-20260215` → `claude-opus-4.7`
+- `claude-opus-4-7` → `claude-opus-4.7`
+- `claude-haiku-4-5-20251001` → `claude-haiku-4.5`
+- `claude-opus-4-6-fast` → `claude-opus-4.6-fast`
 
-Patterns use glob syntax (`*` matches anything) and are checked in order — the first match wins. If no pattern matches, the model name is passed through unchanged.
+**User-configured mappings** — You can add your own glob-pattern mappings (for cross-provider remaps, deprecated model IDs, etc.). When a user-configured pattern matches, it takes precedence over the built-in Claude normalization.
 
-To override, use any of these methods (highest precedence first):
+Configure via any of these (highest precedence first):
 
 1. **CLI / env var** — repeatable `--model-map` flag or comma-separated env var:
 
    ```bash
    python copilot_adapter.py serve \
-     --model-map '*sonnet*=claude-sonnet-4.6' \
-     --model-map '*opus*=claude-opus-4.7'
+     --model-map 'gpt-4-turbo=gpt-4-0125-preview'
 
    # Or via environment variable (comma-separated)
-   export COPILOT_ADAPTER_MODEL_MAP='*sonnet*=claude-sonnet-4.6,*opus*=claude-opus-4.7'
+   export COPILOT_ADAPTER_MODEL_MAP='gpt-4-turbo=gpt-4-0125-preview'
    ```
 
 2. **Config file** — add a `model_map` object to the [config file](#config-file):
@@ -395,15 +390,12 @@ To override, use any of these methods (highest precedence first):
    ```json
    {
      "model_map": {
-       "*sonnet*": "claude-sonnet-4.6",
-       "*opus*": "claude-opus-4.7",
-       "*haiku*": "claude-haiku-4.5",
        "gpt-4-turbo": "gpt-4-0125-preview"
      }
    }
    ```
 
-Any override replaces the shipped defaults entirely. Model mapping is applied to all endpoints (chat completions, responses, embeddings, Gemini).
+Patterns use glob syntax (`*` matches anything) and are checked in order — the first match wins. If no pattern matches, Claude-family IDs are auto-normalized (above); other models pass through unchanged. Model mapping is applied to all endpoints (chat completions, responses, embeddings, Gemini).
 
 For Anthropic `/v1/messages` requests, the adapter also uses the final mapped model to choose the upstream Copilot endpoint:
 
