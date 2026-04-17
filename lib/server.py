@@ -728,6 +728,11 @@ def _is_rate_limit_error(line: str) -> bool:
     return line.startswith("error: 429")
 
 
+def _is_transient_upstream_error(line: str) -> bool:
+    """Check if an SSE error line indicates a transient upstream error (502/504)."""
+    return line.startswith("error: 502") or line.startswith("error: 504")
+
+
 def _passthrough_sse_line(line: str) -> str:
     """Format an upstream SSE line for passthrough streaming responses."""
     if line.strip():
@@ -1198,6 +1203,7 @@ async def handle_native_anthropic_messages(
 
         async def event_stream():
             nonlocal client
+            transient_retries = 0
             while True:
                 needs_retry = False
                 recorded = False
@@ -1214,6 +1220,18 @@ async def handle_native_anthropic_messages(
                                 client = fallback
                                 needs_retry = True
                                 break
+                        if (
+                            _is_transient_upstream_error(line)
+                            and not recorded
+                            and transient_retries < 1
+                        ):
+                            transient_retries += 1
+                            logger.warning(
+                                "Transient upstream error before any output (%s); retrying",
+                                line[:120],
+                            )
+                            needs_retry = True
+                            break
                         _debug_error(body, line, upstream_body=upstream_body)
                         yield converter.format_error(line)
                         return
