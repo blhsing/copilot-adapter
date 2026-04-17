@@ -127,7 +127,7 @@ Agent-initiated requests (tool-use follow-ups) always stay on the same account a
 
 **Quota exhaustion detection**: When a Copilot account's premium request quota is exhausted, GitHub silently downgrades the response to a free fallback model (e.g. GPT-4.1) instead of returning an error. The server detects this by comparing the model in the response against the model that was requested — if they don't match, it marks the account as exhausted and automatically retries the request with the next available account. This works for both streaming and non-streaming requests.
 
-For proactive switching *before* hitting the limit, set `--quota-limit N` or let it default from the plan. Usage is tracked in-memory with plan-aware model cost multipliers (e.g. Claude Opus 4.6 costs 3x, GPT-4o costs 0x on paid plans). You can specify each account's current usage via the `TOKEN:PLAN:QUOTA:USAGE` format, `--usage` flag, or config file to start tracking from where you left off. These defaults can be overridden per account — see [Per-account plan and quota](#per-account-plan-and-quota).
+For proactive switching *before* hitting the limit, set `--quota-limit N` or let it default from the plan. Usage is tracked in-memory with plan-aware model cost multipliers (e.g. Claude Opus 4.7 costs 3x, GPT-4o costs 0x on paid plans). You can specify each account's current usage via the `TOKEN:PLAN:QUOTA:USAGE` format, `--usage` flag, or config file to start tracking from where you left off. These defaults can be overridden per account — see [Per-account plan and quota](#per-account-plan-and-quota).
 
 **Supported plans** (`--plan`):
 
@@ -167,7 +167,7 @@ Example `~/.config/copilot-adapter/config.json`:
   "cors_origins": ["*"],
   "model_map": {
     "*sonnet*": "claude-sonnet-4.6",
-    "*opus*": "claude-opus-4.6",
+    "*opus*": "claude-opus-4.7",
     "*haiku*": "claude-haiku-4.5"
   },
   "api_tokens": ["sk-abc123...", "sk-def456..."],
@@ -370,7 +370,7 @@ The project ships with default mappings in `model_map.json`:
 ```json
 {
   "*sonnet*": "claude-sonnet-4.6",
-  "*opus*": "claude-opus-4.6",
+  "*opus*": "claude-opus-4.7",
   "*haiku*": "claude-haiku-4.5"
 }
 ```
@@ -384,10 +384,10 @@ To override, use any of these methods (highest precedence first):
    ```bash
    python copilot_adapter.py serve \
      --model-map '*sonnet*=claude-sonnet-4.6' \
-     --model-map '*opus*=claude-opus-4.6'
+     --model-map '*opus*=claude-opus-4.7'
 
    # Or via environment variable (comma-separated)
-   export COPILOT_ADAPTER_MODEL_MAP='*sonnet*=claude-sonnet-4.6,*opus*=claude-opus-4.6'
+   export COPILOT_ADAPTER_MODEL_MAP='*sonnet*=claude-sonnet-4.6,*opus*=claude-opus-4.7'
    ```
 
 2. **Config file** — add a `model_map` object to the [config file](#config-file):
@@ -396,7 +396,7 @@ To override, use any of these methods (highest precedence first):
    {
      "model_map": {
        "*sonnet*": "claude-sonnet-4.6",
-       "*opus*": "claude-opus-4.6",
+       "*opus*": "claude-opus-4.7",
        "*haiku*": "claude-haiku-4.5",
        "gpt-4-turbo": "gpt-4-0125-preview"
      }

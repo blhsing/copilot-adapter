@@ -740,6 +740,10 @@ def _sanitize_native_anthropic_body(body: dict) -> dict:
     """Drop known unsupported fields before native Anthropic upstream calls."""
     sanitized = dict(body)
     sanitized.pop("context_management", None)
+    # Anthropic models don't support effort "max"; clamp to "high".
+    oc = sanitized.get("output_config")
+    if isinstance(oc, dict) and oc.get("effort") == "max":
+        sanitized["output_config"] = {**oc, "effort": "high"}
     return sanitized
 
 
