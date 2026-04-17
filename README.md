@@ -550,6 +550,10 @@ Examples:
 - Anthropic `output_config.effort: max` → OpenAI `reasoning_effort: xhigh`
 - Anthropic client mapped to `gpt-5.4` → upstream `/v1/responses`
 
+**Effort clamping for native Anthropic passthrough** — Copilot restricts the effort levels accepted for Anthropic models more tightly than Anthropic's direct API. The proxy clamps unsupported values automatically:
+- `claude-opus-4.7`: Copilot only accepts `medium`; any other effort (`low`, `high`, `max`, `xhigh`) is clamped to `medium`.
+- Other Anthropic models: `max` and `xhigh` are clamped to `high` (the highest level Copilot accepts).
+
 This normalization is based on the final mapped model, so it works even when model mapping redirects requests across providers.
 
 ## Available models

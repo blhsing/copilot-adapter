@@ -157,6 +157,7 @@ def _normalize_output_effort(effort: str | None) -> str | None:
         "medium": "medium",
         "high": "high",
         "max": "xhigh",
+        "xhigh": "xhigh",
     }.get(normalized)
 
 
@@ -740,10 +741,18 @@ def _sanitize_native_anthropic_body(body: dict) -> dict:
     """Drop known unsupported fields before native Anthropic upstream calls."""
     sanitized = dict(body)
     sanitized.pop("context_management", None)
-    # Anthropic models don't support effort "max"; clamp to "high".
+    # Copilot limits supported effort levels per model.
     oc = sanitized.get("output_config")
-    if isinstance(oc, dict) and oc.get("effort") == "max":
-        sanitized["output_config"] = {**oc, "effort": "high"}
+    if isinstance(oc, dict) and "effort" in oc:
+        effort = oc["effort"]
+        model = sanitized.get("model", "")
+        if "opus-4.7" in model or "opus-4-7" in model:
+            # Copilot only supports medium for opus 4.7
+            if effort != "medium":
+                sanitized["output_config"] = {**oc, "effort": "medium"}
+        elif effort in ("max", "xhigh"):
+            # Copilot doesn't support max/xhigh; clamp to high
+            sanitized["output_config"] = {**oc, "effort": "high"}
     return sanitized
 
 
