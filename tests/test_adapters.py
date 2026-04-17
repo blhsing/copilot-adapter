@@ -256,7 +256,7 @@ class TestAnthropicAdapter:
     def test_preserve_thinking_for_later_normalization(self):
         adapter = AnthropicAdapter()
         anthropic_body = {
-            "model": "claude-opus-4-6",
+            "model": "claude-opus-4-7",
             "max_tokens": 10,
             "thinking": {"type": "enabled", "budget_tokens": 32000},
             "messages": [{"role": "user", "content": "Hi."}],
@@ -284,7 +284,7 @@ class TestAnthropicAdapter:
         adapter = AnthropicAdapter()
         long_tool_id = "toolu_" + ("abc123" * 67)
         anthropic_body = {
-            "model": "claude-opus-4-6",
+            "model": "claude-opus-4-7",
             "max_tokens": 10,
             "messages": [
                 {
@@ -317,7 +317,7 @@ class TestAnthropicAdapter:
     def test_tool_use_assistant_message_uses_empty_string_content(self):
         adapter = AnthropicAdapter()
         anthropic_body = {
-            "model": "claude-opus-4-6",
+            "model": "claude-opus-4-7",
             "max_tokens": 10,
             "messages": [
                 {
@@ -479,9 +479,9 @@ class TestAnthropicAdapter:
         assert outline["tool_id_lengths"] == [8, 9]
 
     def test_native_anthropic_api_selection(self):
-        assert _should_use_native_anthropic_api("anthropic", "claude-opus-4.6") is True
+        assert _should_use_native_anthropic_api("anthropic", "claude-opus-4.7") is True
         assert _should_use_native_anthropic_api("anthropic", "gpt-5.4") is False
-        assert _should_use_native_anthropic_api("gemini", "claude-opus-4.6") is False
+        assert _should_use_native_anthropic_api("gemini", "claude-opus-4.7") is False
 
     def test_model_match_dot_vs_dash_versions(self):
         # Dot-separated requested vs dash-separated+date-suffix responded
@@ -489,7 +489,7 @@ class TestAnthropicAdapter:
         assert _is_model_match("claude-sonnet-4.6", "claude-sonnet-4-6-20260101") is True
         assert _is_model_match("gpt-5.4", "gpt-5-4-2026") is True
         # Exact matches still work
-        assert _is_model_match("claude-opus-4-6", "claude-opus-4-6") is True
+        assert _is_model_match("claude-opus-4-7", "claude-opus-4-7") is True
         # Date-suffix only (no dot)
         assert _is_model_match("gpt-4o-mini", "gpt-4o-mini-2024-07-18") is True
         # Different models must not match
@@ -555,7 +555,7 @@ class TestAnthropicAdapter:
 
     def test_sanitize_native_anthropic_body_drops_context_management(self):
         body = {
-            "model": "claude-opus-4.6",
+            "model": "claude-opus-4.7",
             "messages": [{"role": "user", "content": "hi"}],
             "thinking": {"type": "adaptive"},
             "output_config": {"effort": "high"},
@@ -596,12 +596,12 @@ class TestAnthropicAdapter:
 class TestAnthropicToResponses:
     def test_simple_user_message(self):
         body = {
-            "model": "claude-opus-4-6",
+            "model": "claude-opus-4-7",
             "max_tokens": 100,
             "messages": [{"role": "user", "content": "Hello"}],
         }
         result = _anthropic_to_responses(body)
-        assert result["model"] == "claude-opus-4-6"
+        assert result["model"] == "claude-opus-4-7"
         assert result["max_output_tokens"] == 100
         assert "max_tokens" not in result
         assert len(result["input"]) == 1
@@ -609,7 +609,7 @@ class TestAnthropicToResponses:
 
     def test_max_tokens_is_clamped_for_responses_api_minimum(self):
         body = {
-            "model": "claude-opus-4-6",
+            "model": "claude-opus-4-7",
             "max_tokens": 1,
             "messages": [{"role": "user", "content": "quota"}],
         }
@@ -1033,7 +1033,7 @@ class TestResponsesStreamHelpers:
     def test_should_use_responses_api(self):
         assert _should_use_responses_api("gpt-5.4") is True
         assert _should_use_responses_api("gpt-4o") is False
-        assert _should_use_responses_api("claude-opus-4-6") is False
+        assert _should_use_responses_api("claude-opus-4-7") is False
 
 
 # ===================================================================

@@ -171,7 +171,7 @@ class TestUsageTracking:
     async def test_record_usage_increments_with_multiplier(self):
         mgr = _make_manager(2, "max-usage")
         client = await mgr.get_client("user")
-        await mgr.record_usage(client, "claude-opus-4.6")  # 3x
+        await mgr.record_usage(client, "claude-opus-4.7")  # 3x
         assert _acct_for_client(mgr, client).premium_used == 3.0
 
     async def test_record_usage_zero_multiplier_model(self):
@@ -202,9 +202,9 @@ class TestUsageTracking:
         mgr = _make_manager(2, "max-usage", quota_limit=5)
         client = await mgr.get_client("user")
         acct = _acct_for_client(mgr, client)
-        await mgr.record_usage(client, "claude-opus-4.6")  # 3x → 3
+        await mgr.record_usage(client, "claude-opus-4.7")  # 3x → 3
         client = await mgr.get_client("user")  # still same account (3 < 5)
-        await mgr.record_usage(client, "claude-opus-4.6")  # 3x → 6 ≥ 5 → exhausted
+        await mgr.record_usage(client, "claude-opus-4.7")  # 3x → 6 ≥ 5 → exhausted
         assert acct.exhausted is True
         # Next user request should go to the other account
         client2 = await mgr.get_client("user")

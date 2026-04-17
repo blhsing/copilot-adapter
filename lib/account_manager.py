@@ -31,6 +31,7 @@ _PAID_MULTIPLIERS: dict[str, float] = {
     # Premium (3x)
     "claude-opus-4.5": 3,
     "claude-opus-4.6": 3,
+    "claude-opus-4.7": 3,
     # Ultra premium (30x)
     "claude-opus-4.6-fast": 30,
 }
