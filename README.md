@@ -35,6 +35,8 @@ Authenticates via a GitHub Personal Access Token (PAT) or GitHub's device flow, 
 pip install -r requirements.txt
 ```
 
+`orjson` is listed as a dependency; if it fails to install on your platform, the adapter automatically falls back to the stdlib `json` module (expect higher memory use when serializing very large tool schemas).
+
 ## Usage
 
 ```bash
@@ -166,6 +168,7 @@ Example `~/.config/copilot-adapter/config.json`:
   "workers": 4,
   "cors_origins": ["*"],
   "model_map": {
+    "*sonnet*": "claude-sonnet-4.6",
     "gpt-4-turbo": "gpt-4-0125-preview"
   },
   "api_tokens": ["sk-abc123...", "sk-def456..."],

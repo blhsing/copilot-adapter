@@ -1,9 +1,21 @@
 """HTTP client for the GitHub Copilot API."""
 
+import json
 import uuid
 from typing import AsyncIterator
 
 import httpx
+
+try:
+    import orjson  # type: ignore
+
+    def _encode(body: dict) -> bytes:
+        """Serialize request body with orjson to avoid stdlib json memory blow-ups on large tool schemas."""
+        return orjson.dumps(body)
+except ImportError:
+    def _encode(body: dict) -> bytes:
+        """Fallback serializer when orjson isn't installed; may use more memory on large payloads."""
+        return json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 from .auth import CopilotTokenManager
 
@@ -50,7 +62,7 @@ class CopilotClient:
             return await client.post(
                 self._url("/chat/completions"),
                 headers=await self._headers(initiator),
-                json=body,
+                content=_encode(body),
             )
 
     async def stream_chat_completions(
@@ -62,7 +74,7 @@ class CopilotClient:
                 "POST",
                 self._url("/chat/completions"),
                 headers=await self._headers(initiator),
-                json=body,
+                content=_encode(body),
             ) as response:
                 if response.status_code != 200:
                     text = await response.aread()
@@ -83,7 +95,7 @@ class CopilotClient:
             return await client.post(
                 self._url("/responses"),
                 headers=await self._headers(initiator),
-                json=body,
+                content=_encode(body),
             )
 
     async def stream_responses(
@@ -95,7 +107,7 @@ class CopilotClient:
                 "POST",
                 self._url("/responses"),
                 headers=await self._headers(initiator),
-                json=body,
+                content=_encode(body),
             ) as response:
                 if response.status_code != 200:
                     text = await response.aread()
@@ -122,7 +134,7 @@ class CopilotClient:
             return await client.post(
                 self._url("/embeddings"),
                 headers=await self._headers(initiator),
-                json=body,
+                content=_encode(body),
             )
 
     async def messages(
@@ -132,7 +144,7 @@ class CopilotClient:
             return await client.post(
                 self._url("/v1/messages", query),
                 headers=await self._headers(initiator),
-                json=body,
+                content=_encode(body),
             )
 
     async def stream_messages(
@@ -144,7 +156,7 @@ class CopilotClient:
                 "POST",
                 self._url("/v1/messages", query),
                 headers=await self._headers(initiator),
-                json=body,
+                content=_encode(body),
             ) as response:
                 if response.status_code != 200:
                     text = await response.aread()
