@@ -355,25 +355,18 @@ class GeminiAdapter(FormatAdapter):
         if not contents:
             return "user"
 
+        # Only the last turn is a reliable signal. A functionResponse in
+        # the last turn means the client is auto-continuing after a tool
+        # call. Prior tool activity in history does NOT imply the current
+        # turn is agent-initiated — chat UIs re-send full history.
         last_parts = contents[-1].get("parts", [])
         for part in last_parts:
             if "functionResponse" in part:
                 logger.debug("infer_initiator: functionResponse in last turn -> agent")
                 return "agent"
 
-        # Prior tool activity means this is an agentic follow-up.
-        for turn in contents:
-            for part in turn.get("parts", []):
-                if "functionCall" in part or "functionResponse" in part:
-                    logger.debug(
-                        "infer_initiator: prior function call/response in history, "
-                        "last turn role=%s -> agent",
-                        contents[-1].get("role"),
-                    )
-                    return "agent"
-
         logger.debug(
-            "infer_initiator: no tool activity detected, %d turns, "
+            "infer_initiator: no functionResponse in last turn, %d turns, "
             "last role=%s -> user",
             len(contents),
             contents[-1].get("role"),

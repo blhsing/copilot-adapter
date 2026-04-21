@@ -42,32 +42,17 @@ class OpenAIAdapter(FormatAdapter):
         if not messages:
             return "user"
 
+        # Only the last message is a reliable signal. A role=tool message
+        # means the client is auto-continuing after a tool call. Prior
+        # tool activity in history does NOT imply the current turn is
+        # agent-initiated — chat UIs re-send full history every turn.
         if messages[-1].get("role") == "tool":
             logger.debug("infer_initiator: last message role=tool -> agent")
             return "agent"
 
-        # Prior tool activity means this is an agentic follow-up.
-        for msg in messages:
-            role = msg.get("role")
-            if role == "tool":
-                logger.debug(
-                    "infer_initiator: prior tool message in history, "
-                    "last role=%s -> agent",
-                    messages[-1].get("role"),
-                )
-                return "agent"
-            if role == "assistant" and msg.get("tool_calls"):
-                logger.debug(
-                    "infer_initiator: prior tool_calls in history, "
-                    "last role=%s -> agent",
-                    messages[-1].get("role"),
-                )
-                return "agent"
-
         logger.debug(
-            "infer_initiator: no tool activity detected, %d messages, "
-            "last role=%s -> user",
-            len(messages),
+            "infer_initiator: last message role=%s -> user (%d messages)",
             messages[-1].get("role"),
+            len(messages),
         )
         return "user"
