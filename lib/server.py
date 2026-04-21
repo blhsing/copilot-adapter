@@ -26,6 +26,8 @@ logger = logging.getLogger(__name__)
 account_mgr: AccountManager | None = None
 _force_free: bool = False
 _free_within_minutes: float | None = None
+_stub_bill: bool = False
+_stub_model: str = "claude-haiku-4.5"
 _model_map: list[tuple[str, str]] = []
 _api_tokens: set[str] | None = None
 _web_search_max_iterations: int = 3
@@ -627,6 +629,8 @@ async def _lifespan(application: FastAPI):
     global account_mgr
     global _force_free
     global _free_within_minutes
+    global _stub_bill
+    global _stub_model
     global _model_map
     global _api_tokens
     global _web_search_max_iterations
@@ -635,6 +639,8 @@ async def _lifespan(application: FastAPI):
         _force_free = os.environ.get("_COPILOT_ADAPTER_FREE", "") == "1"
         fwm_raw = os.environ.get("_COPILOT_ADAPTER_FREE_WITHIN_MINUTES", "")
         _free_within_minutes = float(fwm_raw) if fwm_raw else None
+        _stub_bill = os.environ.get("_COPILOT_ADAPTER_STUB_BILL", "") == "1"
+        _stub_model = os.environ.get("_COPILOT_ADAPTER_STUB_MODEL", "") or "claude-haiku-4.5"
         # Format: "token1:username1:plan1:quota1:usage1,..."
         strategy = os.environ.get("_COPILOT_ADAPTER_STRATEGY", "max-usage")
         quota_limit_raw = os.environ.get("_COPILOT_ADAPTER_QUOTA_LIMIT", "")
@@ -694,14 +700,18 @@ def init_app(
     mgr: AccountManager, cors_origins: list[str] | None = None,
     force_free: bool = False,
     free_within_minutes: float | None = None,
+    stub_bill: bool = False,
+    stub_model: str = "claude-haiku-4.5",
     model_map: list[tuple[str, str]] | None = None,
     api_tokens: list[str] | None = None,
     web_search_max_iterations: int = 1,
 ) -> FastAPI:
-    global account_mgr, _force_free, _free_within_minutes, _model_map, _api_tokens, _web_search_max_iterations
+    global account_mgr, _force_free, _free_within_minutes, _stub_bill, _stub_model, _model_map, _api_tokens, _web_search_max_iterations
     account_mgr = mgr
     _force_free = force_free
     _free_within_minutes = free_within_minutes
+    _stub_bill = stub_bill
+    _stub_model = stub_model
     _model_map = model_map if model_map is not None else load_default_model_map()
     _api_tokens = set(api_tokens) if api_tokens else None
     _web_search_max_iterations = web_search_max_iterations
@@ -902,6 +912,39 @@ def _debug_error(
     logger.debug("Upstream error message window: %s", json.dumps(window, ensure_ascii=False))
 
 
+async def _maybe_consume_billed_stub(client, resolved: str, requested_model: str) -> str:
+    """If --stub-bill is on and this call would be billed, fire a tiny cheap
+    billed request against _stub_model so it absorbs the premium-request charge,
+    then return "agent" so the real call is not billed. If the stub fails, return
+    resolved unchanged so the real call runs normally."""
+    if not _stub_bill or _force_free or resolved != "user":
+        return resolved
+    stub_body = {
+        "model": _stub_model,
+        "messages": [{"role": "user", "content": "test"}],
+        "max_tokens": 1,
+        "stream": False,
+    }
+    try:
+        resp = await client.messages(stub_body, initiator="user")
+        if resp.status_code != 200:
+            logger.warning(
+                "Stub-bill call failed (%s %s) — falling through to real billed request",
+                resp.status_code, resp.text[:200],
+            )
+            return resolved
+    except Exception as e:
+        logger.warning("Stub-bill call exception — falling through (%s)", e)
+        return resolved
+    await account_mgr.record_usage(client, _stub_model)
+    await account_mgr.record_request_time(client)
+    logger.info(
+        "Stub-bill: consumed billing with %s; real %s request will run as agent",
+        _stub_model, requested_model,
+    )
+    return "agent"
+
+
 async def handle_chat_completion(
     adapter: FormatAdapter, body: dict, *, request: Request | None = None, initiator: str | None = None
 ):
@@ -934,6 +977,8 @@ async def handle_chat_completion(
                         elapsed, _free_within_minutes)
 
     account = account_mgr.get_username(client)
+
+    resolved = await _maybe_consume_billed_stub(client, resolved, requested_model)
 
     billed_status = "yes" if resolved == "user" else "no"
     logger.info("Chat completion requested by %s (billed: %s, model: %s, account: %s)", resolved, billed_status, requested_model, account)
@@ -1218,6 +1263,8 @@ async def handle_native_anthropic_messages(
                         elapsed, _free_within_minutes)
 
     account = account_mgr.get_username(client)
+    resolved = await _maybe_consume_billed_stub(client, resolved, requested_model)
+
     billed_status = "yes" if resolved == "user" else "no"
     logger.info(
         "Anthropic native messages requested by %s (billed: %s, model: %s, account: %s)",
@@ -1342,6 +1389,8 @@ async def handle_anthropic_via_responses(
             )
 
     account = account_mgr.get_username(client)
+    resolved = await _maybe_consume_billed_stub(client, resolved, requested_model)
+
     billed_status = "yes" if resolved == "user" else "no"
     logger.info(
         "Anthropic→Responses requested by %s (billed: %s, model: %s, account: %s)",
@@ -2024,6 +2073,8 @@ async def gemini_stream_generate_content(model_id: str, request: Request):
                         elapsed, _free_within_minutes)
 
     account = account_mgr.get_username(client)
+
+    resolved = await _maybe_consume_billed_stub(client, resolved, requested_model)
 
     billed_status = "yes" if resolved == "user" else "no"
     logger.info("Chat completion requested by %s (billed: %s, model: %s, account: %s)", resolved, billed_status, requested_model, account)

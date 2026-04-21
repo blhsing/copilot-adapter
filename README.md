@@ -208,6 +208,8 @@ All CLI options can be set via environment variables:
 | `--log-file` | `COPILOT_ADAPTER_LOG_FILE` | *(none)* |
 | `--free` | `COPILOT_ADAPTER_FREE` | *(off)* |
 | `--free-within-minutes` | `COPILOT_ADAPTER_FREE_WITHIN_MINUTES` | *(off)* |
+| `--stub-bill` | `COPILOT_ADAPTER_STUB_BILL` | *(off)* |
+| `--stub-model` | `COPILOT_ADAPTER_STUB_MODEL` | `claude-haiku-4.5` |
 | `--proxy` | `COPILOT_ADAPTER_PROXY` | *(off)* |
 | `--ca-dir` | `COPILOT_ADAPTER_CA_DIR` | `~/.config/copilot-adapter` |
 | `--model-map` | `COPILOT_ADAPTER_MODEL_MAP` | *(none — Claude IDs auto-normalized)* |
@@ -319,6 +321,20 @@ The logic: the first request in a session is billed normally (as `user`), but su
 This is useful when you want to limit premium billing to one request per session rather than eliminating it entirely. It's mutually exclusive with `--free`.
 
 When using multi-account rotation, agent-initiated requests always stay on the same account as the preceding user request to avoid billing a premium request on a different account.
+
+### Stub-bill mode
+
+Use `--stub-bill` to route billing through a cheap stub model. For each user-initiated request, the adapter first fires a tiny billed call (one-token `"test"` prompt) against `--stub-model` (default `claude-haiku-4.5`), then runs the real request marked as agent-initiated:
+
+```bash
+python copilot_adapter.py serve --stub-bill
+# or with a custom stub model
+python copilot_adapter.py serve --stub-bill --stub-model claude-haiku-4.5
+```
+
+This satisfies Copilot's "one premium request per user turn" accounting with the cheapest eligible model, while the actual (potentially expensive) request runs as agent — so a large opus-4.7 call effectively costs one haiku premium request instead of one opus premium request.
+
+Costs: an extra round trip per user turn (~200–500 ms). If the stub call fails (rate limit, 5xx, quota exhausted), the real request falls through and is billed normally. Independent from `--free` / `--free-within-minutes`: when those already demote the request to agent, the stub is skipped.
 
 ## Forward proxy mode
 
