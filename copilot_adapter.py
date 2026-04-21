@@ -302,6 +302,15 @@ def config(tool: str, revert: bool, host: str, port: int,
               envvar="COPILOT_ADAPTER_FREE_WITHIN_MINUTES",
               help="Mark user requests as agent-initiated if the last request "
                    "was less than N minutes ago. Mutually exclusive with --free.")
+@click.option("--stub-bill", "stub_bill", is_flag=True, default=False,
+              envvar="COPILOT_ADAPTER_STUB_BILL",
+              help="For each user-initiated request, first fire a tiny billed "
+                   "stub call against --stub-model, then run the real request "
+                   "as agent-initiated. Falls through to normal billing if the "
+                   "stub call fails.")
+@click.option("--stub-model", default=None, metavar="MODEL",
+              envvar="COPILOT_ADAPTER_STUB_MODEL",
+              help="Model used by --stub-bill (default: claude-haiku-4.5).")
 @click.option("--proxy", "proxy_mode", is_flag=True, default=False,
               envvar="COPILOT_ADAPTER_PROXY",
               help="Enable forward proxy mode on the same port. CONNECT requests to "
@@ -337,6 +346,7 @@ def serve(config_path: str | None, host: str | None, port: int | None,
           quota_limit: int | None, plan: str | None,
           log_level: str | None, log_file: str | None, force_free: bool,
           free_within_minutes: float | None,
+          stub_bill: bool, stub_model: str | None,
           proxy_mode: bool,
           ca_dir: str | None, model_map_raw: tuple[str, ...],
           proxy_user: str | None, proxy_password: str | None,
@@ -364,6 +374,8 @@ def serve(config_path: str | None, host: str | None, port: int | None,
     force_free = force_free or cfg.get("free", False)
     free_within_minutes = (free_within_minutes if free_within_minutes is not None
                            else cfg.get("free_within_minutes"))
+    stub_bill = stub_bill or cfg.get("stub_bill", False)
+    stub_model = stub_model or cfg.get("stub_model") or "claude-haiku-4.5"
     if force_free and free_within_minutes is not None:
         raise click.UsageError("--free and --free-within-minutes are mutually exclusive.")
     proxy_mode = proxy_mode or cfg.get("proxy", False)
@@ -492,6 +504,8 @@ def serve(config_path: str | None, host: str | None, port: int | None,
         print("\n** Free mode enabled: all requests will be marked as agent-initiated **")
     if free_within_minutes is not None:
         print(f"\n** Time-based free mode: requests within {free_within_minutes} min of last → agent **")
+    if stub_bill:
+        print(f"\n** Stub-bill mode: user requests billed via {stub_model}, real request runs as agent **")
     if api_tokens:
         print(f"\n** API token protection enabled ({len(api_tokens)} token(s)) **")
     if proxy_user and proxy_password:
@@ -524,6 +538,9 @@ def serve(config_path: str | None, host: str | None, port: int | None,
             os.environ["_COPILOT_ADAPTER_FREE"] = "1"
         if free_within_minutes is not None:
             os.environ["_COPILOT_ADAPTER_FREE_WITHIN_MINUTES"] = str(free_within_minutes)
+        if stub_bill:
+            os.environ["_COPILOT_ADAPTER_STUB_BILL"] = "1"
+            os.environ["_COPILOT_ADAPTER_STUB_MODEL"] = stub_model
         if model_map_list is not None:
             os.environ["_COPILOT_ADAPTER_MODEL_MAP"] = ",".join(
                 f"{p}={t}" for p, t in model_map_list
@@ -545,6 +562,8 @@ def serve(config_path: str | None, host: str | None, port: int | None,
         application = init_app(acct_mgr, cors_origins=list(cors_origin) or None,
                                force_free=force_free,
                                free_within_minutes=free_within_minutes,
+                               stub_bill=stub_bill,
+                               stub_model=stub_model,
                                model_map=model_map_list,
                                api_tokens=api_tokens,
                                web_search_max_iterations=web_search_iterations)
