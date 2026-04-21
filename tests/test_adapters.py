@@ -555,7 +555,7 @@ class TestAnthropicAdapter:
 
     def test_sanitize_native_anthropic_body_drops_context_management(self):
         body = {
-            "model": "claude-opus-4.7",
+            "model": "claude-opus-4.6",
             "messages": [{"role": "user", "content": "hi"}],
             "thinking": {"type": "adaptive"},
             "output_config": {"effort": "high"},
