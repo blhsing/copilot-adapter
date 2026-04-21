@@ -334,7 +334,7 @@ python copilot_adapter.py serve --stub-bill --stub-model claude-haiku-4.5
 
 This satisfies Copilot's "one premium request per user turn" accounting with the cheapest eligible model, while the actual (potentially expensive) request runs as agent — so a large opus-4.7 call effectively costs one haiku premium request instead of one opus premium request.
 
-Costs: an extra round trip per user turn (~200–500 ms). If the stub call fails (rate limit, 5xx, quota exhausted), the real request falls through and is billed normally. Independent from `--free` / `--free-within-minutes`: when those already demote the request to agent, the stub is skipped.
+Costs: the stub call runs in the background concurrently with the real request, so there is no added latency. If the stub call fails (rate limit, 5xx, quota exhausted), the real request has already gone out as agent and is not billed — the billing slot is skipped for that turn, but the user request still completes. Independent from `--free` / `--free-within-minutes`: when those already demote the request to agent, the stub is skipped.
 
 ## Forward proxy mode
 

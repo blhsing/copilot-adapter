@@ -28,6 +28,7 @@ _force_free: bool = False
 _free_within_minutes: float | None = None
 _stub_bill: bool = False
 _stub_model: str = "claude-haiku-4.5"
+_pending_stub_tasks: set[asyncio.Task] = set()
 _model_map: list[tuple[str, str]] = []
 _api_tokens: set[str] | None = None
 _web_search_max_iterations: int = 3
@@ -914,9 +915,11 @@ def _debug_error(
 
 async def _maybe_consume_billed_stub(client, resolved: str, requested_model: str) -> str:
     """If --stub-bill is on and this call would be billed, fire a tiny cheap
-    billed request against _stub_model so it absorbs the premium-request charge,
-    then return "agent" so the real call is not billed. If the stub fails, return
-    resolved unchanged so the real call runs normally."""
+    billed request against _stub_model in the background so it absorbs the
+    premium-request charge, and return "agent" immediately so the real call
+    is not billed and can be sent in parallel. If the background stub fails,
+    the real request has already been committed as agent — the billing slot
+    is lost, but the user request still completes."""
     if not _stub_bill or _force_free or resolved != "user":
         return resolved
     stub_body = {
@@ -925,22 +928,28 @@ async def _maybe_consume_billed_stub(client, resolved: str, requested_model: str
         "max_tokens": 1,
         "stream": False,
     }
-    try:
-        resp = await client.messages(stub_body, initiator="user")
-        if resp.status_code != 200:
-            logger.warning(
-                "Stub-bill call failed (%s %s) — falling through to real billed request",
-                resp.status_code, resp.text[:200],
-            )
-            return resolved
-    except Exception as e:
-        logger.warning("Stub-bill call exception — falling through (%s)", e)
-        return resolved
-    await account_mgr.record_usage(client, _stub_model)
-    await account_mgr.record_request_time(client)
+
+    async def _run_stub():
+        try:
+            resp = await client.messages(stub_body, initiator="user")
+            if resp.status_code != 200:
+                logger.warning(
+                    "Stub-bill background call failed (%s %s)",
+                    resp.status_code, resp.text[:200],
+                )
+                return
+            await account_mgr.record_usage(client, _stub_model)
+            await account_mgr.record_request_time(client)
+            logger.info("Stub-bill: billed %s in background", _stub_model)
+        except Exception as e:
+            logger.warning("Stub-bill background exception (%s)", e)
+
+    task = asyncio.create_task(_run_stub())
+    _pending_stub_tasks.add(task)
+    task.add_done_callback(_pending_stub_tasks.discard)
     logger.info(
-        "Stub-bill: consumed billing with %s; real %s request will run as agent",
-        _stub_model, requested_model,
+        "Stub-bill: demoting real %s request to agent; %s stub fired in background",
+        requested_model, _stub_model,
     )
     return "agent"
 
