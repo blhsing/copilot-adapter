@@ -21,6 +21,11 @@ from .auth import CopilotTokenManager
 
 COPILOT_API = "https://api.githubcopilot.com"
 
+# Shared timeout for Copilot upstream requests. Large prompts (hundreds of
+# messages) can take several minutes server-side before responding, so the read
+# window is generous; connect/write/pool stay short to fail fast on networking.
+_UPSTREAM_TIMEOUT = httpx.Timeout(connect=30, read=1200, write=30, pool=30)
+
 _SESSION_ID = str(uuid.uuid4())
 _MACHINE_ID = uuid.uuid4().hex
 
@@ -58,7 +63,7 @@ class CopilotClient:
     async def chat_completions(
         self, body: dict, *, initiator: str = "user"
     ) -> httpx.Response:
-        async with httpx.AsyncClient(timeout=120) as client:
+        async with httpx.AsyncClient(timeout=_UPSTREAM_TIMEOUT) as client:
             return await client.post(
                 self._url("/chat/completions"),
                 headers=await self._headers(initiator),
@@ -68,8 +73,7 @@ class CopilotClient:
     async def stream_chat_completions(
         self, body: dict, *, initiator: str = "user"
     ) -> AsyncIterator[str]:
-        timeout = httpx.Timeout(connect=30, read=600, write=30, pool=30)
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httpx.AsyncClient(timeout=_UPSTREAM_TIMEOUT) as client:
             async with client.stream(
                 "POST",
                 self._url("/chat/completions"),
@@ -91,7 +95,7 @@ class CopilotClient:
     async def responses(
         self, body: dict, *, initiator: str = "user"
     ) -> httpx.Response:
-        async with httpx.AsyncClient(timeout=120) as client:
+        async with httpx.AsyncClient(timeout=_UPSTREAM_TIMEOUT) as client:
             return await client.post(
                 self._url("/responses"),
                 headers=await self._headers(initiator),
@@ -101,8 +105,7 @@ class CopilotClient:
     async def stream_responses(
         self, body: dict, *, initiator: str = "user"
     ) -> AsyncIterator[str]:
-        timeout = httpx.Timeout(connect=30, read=600, write=30, pool=30)
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httpx.AsyncClient(timeout=_UPSTREAM_TIMEOUT) as client:
             async with client.stream(
                 "POST",
                 self._url("/responses"),
@@ -140,7 +143,7 @@ class CopilotClient:
     async def messages(
         self, body: dict, *, initiator: str = "user", query: str | None = None
     ) -> httpx.Response:
-        async with httpx.AsyncClient(timeout=120) as client:
+        async with httpx.AsyncClient(timeout=_UPSTREAM_TIMEOUT) as client:
             return await client.post(
                 self._url("/v1/messages", query),
                 headers=await self._headers(initiator),
@@ -150,8 +153,7 @@ class CopilotClient:
     async def stream_messages(
         self, body: dict, *, initiator: str = "user", query: str | None = None
     ) -> AsyncIterator[str]:
-        timeout = httpx.Timeout(connect=30, read=600, write=30, pool=30)
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httpx.AsyncClient(timeout=_UPSTREAM_TIMEOUT) as client:
             async with client.stream(
                 "POST",
                 self._url("/v1/messages", query),
