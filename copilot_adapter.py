@@ -161,7 +161,7 @@ def accounts(add_token: str | None, remove_username: str | None,
         plan = acct.get("plan") or "unset"
         quota = acct.get("quota_limit")
         quota_str = str(quota) if quota is not None else "unset"
-        usage = acct.get("premium_used", 0)
+        usage = round(acct.get("premium_used", 0), 2)
         print(f"  - {acct['username']} ({status}, plan: {plan}, usage: {usage}/{quota_str})")
 
 

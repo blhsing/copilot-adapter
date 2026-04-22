@@ -130,7 +130,7 @@ class AccountManager:
                 username = acct["username"]
                 acct_plan = acct.get("plan", plan)
                 acct_limit = acct.get("quota_limit", quota_limit)
-                acct_used = acct.get("premium_used", 0)
+                acct_used = round(acct.get("premium_used", 0), 2)
             else:
                 token, username = acct
                 acct_plan = plan
@@ -200,7 +200,7 @@ class AccountManager:
                     multiplier = get_model_multiplier(model, acct.plan)
                     if multiplier == 0:
                         return
-                    acct.premium_used += multiplier
+                    acct.premium_used = round(acct.premium_used + multiplier, 2)
                     username = acct.username
                     usage = acct.premium_used
                     if acct.premium_limit is not None and acct.premium_used >= acct.premium_limit:
