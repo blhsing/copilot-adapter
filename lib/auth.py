@@ -80,6 +80,15 @@ def resolve_github_tokens(explicit_tokens: list[str] | None = None) -> list[tupl
         token = token.strip()
         if not token or token in seen_tokens:
             return False
+        if token.startswith("ghp_"):
+            print(
+                f"  Warning: token ending in ...{token[-4:]} is a Personal Access "
+                f"Token (ghp_). PATs are not accepted by the Copilot API "
+                f"(api.github.com/copilot_internal/v2/token returns 404). "
+                f"Use `python copilot_adapter.py login` to obtain an OAuth "
+                f"token (ghu_) via device flow. Skipping."
+            )
+            return False
         username = _validate_github_token(token)
         if username:
             seen_tokens.add(token)
@@ -252,11 +261,20 @@ def list_accounts() -> list[dict]:
 def add_account(token: str, *, plan: str | None = None,
                 quota_limit: int | None = None,
                 premium_used: float | None = None) -> dict | None:
-    """Validate a PAT and add it to the cached accounts.
+    """Validate a GitHub OAuth token (ghu_) and add it to the cached accounts.
 
+    Rejects PATs (ghp_) up-front since the Copilot API returns 404 for them.
     Returns a dict with username/plan/quota_limit/premium_used on success, None if invalid.
     """
     from .account_manager import PLAN_QUOTAS
+
+    if token.startswith("ghp_"):
+        print(
+            f"Error: token ending in ...{token[-4:]} is a Personal Access Token (ghp_). "
+            f"The Copilot API does not accept PATs. Use `python copilot_adapter.py login` "
+            f"to obtain an OAuth token via device flow."
+        )
+        return None
 
     username = _validate_github_token(token)
     if not username:
