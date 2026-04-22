@@ -2,7 +2,9 @@
 
 An OpenAI / Anthropic / Gemini-compatible LLM API proxy server backed by GitHub Copilot.
 
-Authenticates via a GitHub Personal Access Token (PAT) or GitHub's device flow, then proxies requests to GitHub Copilot's backend through a local server that speaks all three major LLM API formats.
+Authenticates via GitHub's device-flow OAuth (`ghu_` tokens), then proxies requests to GitHub Copilot's backend through a local server that speaks all three major LLM API formats.
+
+> **Note:** GitHub Personal Access Tokens (`ghp_`) are **not accepted** by the Copilot API — the `api.github.com/copilot_internal/v2/token` endpoint returns 404 for PATs regardless of the account's Copilot plan. Only OAuth tokens obtained via the device flow (`ghu_` prefix) work. See [PATs don't work for the Copilot API](#pats-dont-work-for-the-copilot-api).
 
 ## Key features
 
@@ -17,7 +19,7 @@ Authenticates via a GitHub Personal Access Token (PAT) or GitHub's device flow, 
 - [**Cross-provider reasoning effort mapping**](#parameter-compatibility) — Preserves Anthropic thinking / `output_config.effort` when requests are mapped to OpenAI-style models, including Responses-only targets like `gpt-5.4`
 - [**Server-side web search**](#server-side-web-search) — Converts Anthropic's built-in `web_search` tool type to a function tool, intercepts it server-side via DuckDuckGo, and returns Anthropic-native structured search results to Anthropic clients; strips other unsupported built-in types
 - **Streaming support** — Full SSE streaming across all three formats, including real-time format translation
-- [**Flexible authentication**](#authentication) — Supports multiple GitHub PATs, environment variables, cached tokens, and interactive device-flow OAuth, with automatic fallback
+- [**Flexible authentication**](#authentication) — Interactive device-flow OAuth with cached tokens and multi-account support
 - **Multi-worker support** — Spawns multiple worker processes for higher throughput
 - **Concurrent-safe token management** — Only one token refresh happens at a time under concurrent load
 - [**Docker ready**](#docker) — Pre-built image on [GHCR](https://github.com/blhsing/copilot-adapter/pkgs/container/copilot-adapter), or build locally
@@ -40,14 +42,7 @@ pip install -r requirements.txt
 ## Usage
 
 ```bash
-# Start the server with a GitHub PAT (no interactive login needed)
-python copilot_adapter.py serve --github-token ghp_xxx
-
-# Or use an environment variable
-export COPILOT_ADAPTER_GITHUB_TOKEN=ghp_xxx
-python copilot_adapter.py serve
-
-# Interactive device-flow login (opens browser)
+# Interactive device-flow login (opens browser) — required first-time setup
 python copilot_adapter.py login
 python copilot_adapter.py serve
 
@@ -61,28 +56,28 @@ python copilot_adapter.py serve --workers 4
 python copilot_adapter.py logout
 ```
 
-Token lookup order: `--github-token` flag > `COPILOT_ADAPTER_GITHUB_TOKEN` env var > `GITHUB_TOKEN` env var > cached tokens > interactive device flow.
+Token lookup order: cached device-flow tokens > interactive device flow. `--github-token` and `COPILOT_ADAPTER_GITHUB_TOKEN` / `GITHUB_TOKEN` are still accepted for supplying OAuth tokens (`ghu_`) obtained out-of-band, but `ghp_` Personal Access Tokens are rejected with a warning — the Copilot API does not accept them.
 
 ### Per-account plan and quota
 
-When accounts are on different Copilot tiers, append the plan and quota limit to the token with colons:
+When accounts are on different Copilot tiers, append the plan and quota limit to the token with colons. (Device-flow login prompts for plan/quota interactively, but these may also be supplied via CLI/env for OAuth tokens obtained out-of-band.)
 
 ```bash
 # TOKEN:PLAN:QUOTA format
 python copilot_adapter.py serve \
-  --github-token ghp_aaa:pro:300 \
-  --github-token ghp_bbb:free:50
+  --github-token ghu_aaa:pro:300 \
+  --github-token ghu_bbb:free:50
 
 # TOKEN:PLAN:QUOTA:USAGE format (specify current premium usage)
 python copilot_adapter.py serve \
-  --github-token ghp_aaa:pro:300:150.5 \
-  --github-token ghp_bbb:free:50:12
+  --github-token ghu_aaa:pro:300:150.5 \
+  --github-token ghu_bbb:free:50:12
 
 # Bare tokens fall back to the global --plan default (pro) and its quota (300)
 python copilot_adapter.py serve \
-  --github-token ghp_aaa:enterprise:1000 \
-  --github-token ghp_bbb:free:50 \
-  --github-token ghp_ccc
+  --github-token ghu_aaa:enterprise:1000 \
+  --github-token ghu_bbb:free:50 \
+  --github-token ghu_ccc
 ```
 
 ### Multi-account
@@ -94,18 +89,18 @@ Pool multiple GitHub Copilot accounts to extend your premium request quota:
 python copilot_adapter.py login   # adds first account
 python copilot_adapter.py login   # adds second account
 
-# Or pass multiple PATs
-python copilot_adapter.py serve --github-token ghp_aaa --github-token ghp_bbb
+# Or pass multiple OAuth tokens (ghu_) obtained out-of-band
+python copilot_adapter.py serve --github-token ghu_aaa --github-token ghu_bbb
 
 # Or comma-separated in an env var
-export COPILOT_ADAPTER_GITHUB_TOKEN=ghp_aaa,ghp_bbb
+export COPILOT_ADAPTER_GITHUB_TOKEN=ghu_aaa,ghu_bbb
 python copilot_adapter.py serve
 
 # List cached accounts (shows plan, quota, and usage)
 python copilot_adapter.py accounts
 
-# Add a PAT to the cache (with optional plan/quota/usage)
-python copilot_adapter.py accounts --add ghp_xxx --plan pro --quota-limit 300 --usage 50
+# Add an OAuth token to the cache (with optional plan/quota/usage)
+python copilot_adapter.py accounts --add ghu_xxx --plan pro --quota-limit 300 --usage 50
 
 # Update plan/quota/usage for a cached account
 python copilot_adapter.py accounts --update octocat --plan pro+ --quota-limit 1500 --usage 200
@@ -174,10 +169,10 @@ Example `~/.config/copilot-adapter/config.json`:
   "api_tokens": ["sk-abc123...", "sk-def456..."],
   "web_search_iterations": 3,
   "accounts": [
-    {"token": "ghp_aaa", "plan": "enterprise", "quota_limit": 1000, "premium_used": 250},
-    {"token": "ghp_bbb", "plan": "free"},
-    "ghp_ccc:pro+:1500:100.5",
-    "ghp_ddd"
+    {"token": "ghu_aaa", "plan": "enterprise", "quota_limit": 1000, "premium_used": 250},
+    {"token": "ghu_bbb", "plan": "free"},
+    "ghu_ccc:pro+:1500:100.5",
+    "ghu_ddd"
   ]
 }
 ```
@@ -233,12 +228,19 @@ docker pull ghcr.io/blhsing/copilot-adapter:latest
 ```
 
 ```bash
-# Run
-docker run -p 18080:18080 -e COPILOT_ADAPTER_GITHUB_TOKEN=ghp_xxx ghcr.io/blhsing/copilot-adapter
+# First-time setup: run device-flow login with a persistent volume, then start the daemon
+docker run --rm -it \
+  -v copilot-adapter-config:/root/.config/copilot-adapter \
+  ghcr.io/blhsing/copilot-adapter login
 
-# Multi-account with rotation
+# Run the server using the cached OAuth token
 docker run -p 18080:18080 \
-  -e COPILOT_ADAPTER_GITHUB_TOKEN=ghp_aaa,ghp_bbb \
+  -v copilot-adapter-config:/root/.config/copilot-adapter \
+  ghcr.io/blhsing/copilot-adapter
+
+# Multi-account with rotation (login multiple times, then serve)
+docker run -p 18080:18080 \
+  -v copilot-adapter-config:/root/.config/copilot-adapter \
   -e COPILOT_ADAPTER_STRATEGY=max-usage \
   -e COPILOT_ADAPTER_QUOTA_LIMIT=300 \
   ghcr.io/blhsing/copilot-adapter
@@ -248,8 +250,12 @@ Or build locally:
 
 ```bash
 docker build -t copilot-adapter .
-docker run -p 18080:18080 -e COPILOT_ADAPTER_GITHUB_TOKEN=ghp_xxx copilot-adapter
+docker run -p 18080:18080 \
+  -v copilot-adapter-config:/root/.config/copilot-adapter \
+  copilot-adapter
 ```
+
+> PATs (`ghp_`) passed via `COPILOT_ADAPTER_GITHUB_TOKEN` / `GITHUB_TOKEN` will be rejected — the Copilot API returns 404 for Personal Access Tokens. Use device-flow login instead (see above).
 
 ## Endpoints
 
@@ -633,23 +639,25 @@ Install-Module PSReadLine -Force -SkipPublisherCheck
 
 Restart PowerShell after upgrading. This issue does not affect Windows 11, Windows Terminal, or cmd.exe.
 
-### PATs don't work for organization-managed Copilot seats
+### PATs don't work for the Copilot API
 
-The `api.github.com/copilot_internal/v2/token` endpoint returns 404 for `ghp_` Personal Access Tokens when the Copilot seat is managed through a GitHub organization (Business or Enterprise plan). This endpoint only works with OAuth tokens obtained via the device flow (`ghu_` prefix).
+GitHub Personal Access Tokens (`ghp_` prefix) are **not accepted** by the Copilot API. The `api.github.com/copilot_internal/v2/token` endpoint returns 404 for any PAT — this is true regardless of whether the account's Copilot seat is personal, Business, or Enterprise. Only OAuth tokens obtained via the device flow (`ghu_` prefix) authenticate against this endpoint.
 
-**Symptom:** `serve` prints "Authenticated as &lt;username&gt;" but then fails with:
+The adapter detects PATs at startup and rejects them with a warning; if a PAT is the only credential supplied, the server will refuse to start.
+
+**Symptom** (if a PAT somehow reaches the token-exchange step, e.g. via an older cached entry):
 
 ```
 Error: Failed to get Copilot token: Client error '404 Not Found' for url 'https://api.github.com/copilot_internal/v2/token'
 ```
 
-**Fix:** Use the device flow instead of a PAT:
+**Fix:** Use the device flow:
 
 ```bash
 python copilot_adapter.py login
 ```
 
-If you previously added the PAT to the cache, remove it first:
+If you previously added a PAT to the cache, remove it first:
 
 ```bash
 python copilot_adapter.py accounts --remove <username>

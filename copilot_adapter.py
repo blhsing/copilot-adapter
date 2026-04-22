@@ -54,7 +54,7 @@ def _load_config(path: str | None) -> dict:
 
 
 def _parse_token_spec(raw: str) -> dict:
-    """Parse a token spec like ``ghp_xxx`` or ``ghp_xxx:free:50:10.5``.
+    """Parse a token spec like ``ghu_xxx`` or ``ghu_xxx:free:50:10.5``.
 
     Returns a dict with keys ``token`` and optionally ``plan``,
     ``quota_limit``, and ``premium_used``.
@@ -102,7 +102,7 @@ def logout(username: str | None, remove_all: bool):
 
 @main.command()
 @click.option("--add", "add_token", default=None, metavar="TOKEN",
-              help="Add a GitHub PAT to the cached accounts.")
+              help="Add a GitHub OAuth token (ghu_) to the cached accounts. PATs (ghp_) are rejected by the Copilot API.")
 @click.option("--remove", "remove_username", default=None, metavar="USER",
               help="Remove a cached account by username.")
 @click.option("--update", "update_username", default=None, metavar="USER",
@@ -269,7 +269,8 @@ def config(tool: str, revert: bool, host: str, port: int,
               help="Port to bind to.")
 @click.option("--github-token", multiple=True, envvar="COPILOT_ADAPTER_GITHUB_TOKEN",
               metavar="TOKEN",
-              help="GitHub PAT (repeatable, supports TOKEN:PLAN:QUOTA:USAGE format). "
+              help="GitHub OAuth token (ghu_) from device-flow login (repeatable, supports TOKEN:PLAN:QUOTA:USAGE format). "
+                   "PATs (ghp_) are rejected — the Copilot API returns 404 for them. "
                    "Env var supports comma-separated values.")
 @click.option("--cors-origin", multiple=True, envvar="COPILOT_ADAPTER_CORS_ORIGIN",
               metavar="ORIGIN",
