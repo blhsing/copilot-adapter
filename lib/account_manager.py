@@ -31,7 +31,8 @@ _PAID_MULTIPLIERS: dict[str, float] = {
     # Premium (3x)
     "claude-opus-4.5": 3,
     "claude-opus-4.6": 3,
-    "claude-opus-4.7": 3,
+    # Ultra premium (7.5x)
+    "claude-opus-4.7": 7.5,
 }
 
 # On the Free plan, every available model costs 1 premium request.
