@@ -17,7 +17,7 @@ Authenticates via GitHub's device-flow OAuth (`ghu_` tokens), then proxies reque
 - [**One-command tool setup**](#tool-configuration) — Automatically configure popular agentic coding tools (Claude Code, Codex, Gemini CLI, OpenCode) to use this proxy, with easy revert to defaults
 - [**Configurable model mapping**](#model-mapping) — Built-in Claude model-ID normalization plus optional glob-pattern overrides
 - [**Cross-provider reasoning effort mapping**](#parameter-compatibility) — Preserves Anthropic thinking / `output_config.effort` when requests are mapped to OpenAI-style models, including Responses-only targets like `gpt-5.4`
-- [**Server-side web search**](#server-side-web-search) — For Anthropic→Anthropic (Claude) requests, passes Anthropic's built-in `web_search_20250305` tool through to Copilot, which executes it server-side and returns Anthropic-native `server_tool_use`/`web_search_tool_result` blocks. For non-Anthropic target models, converts `web_search` to a function tool and intercepts it via DuckDuckGo; strips other unsupported built-in types.
+- [**Server-side web search**](#server-side-web-search) — Claude-targeted Anthropic requests always use DuckDuckGo interception for `web_search`. Supported OpenAI Responses models keep provider-native web search by default, with `--force-ddg-web-search` available as an override. Other unsupported built-in tool types are stripped.
 - **Streaming support** — Full SSE streaming across all three formats, including real-time format translation
 - [**Flexible authentication**](#authentication) — Interactive device-flow OAuth with cached tokens and multi-account support
 - **Multi-worker support** — Spawns multiple worker processes for higher throughput
@@ -533,18 +533,17 @@ export GEMINI_API_BASE=http://127.0.0.1:18080/v1beta
 
 ## Server-side web search
 
-**Anthropic → Anthropic (Claude) path.** When the adapter routes through Copilot's native `/v1/messages` endpoint, Anthropic's built-in `web_search_20250305` tool is passed through unchanged; Copilot executes the search server-side and returns Anthropic-native `server_tool_use` + `web_search_tool_result` content blocks directly. No adapter-side interception happens.
+**Claude-targeted Anthropic requests.** When an Anthropic `/v1/messages` request targets a Claude model and includes Anthropic's built-in `web_search_20250305` tool, the adapter converts that request to the chat-completions path and intercepts `web_search` server-side using [DuckDuckGo](https://github.com/deedy5/ddgs) (`ddgs` package). Claude models do not use Copilot's native Anthropic web-search passthrough by default.
 
-> Copilot's native web search is gated by the **"Web search tool"** setting in your organization's GitHub Copilot AI controls. If your org has not enabled it, native passthrough will fail. In that case, set `--force-ddg-web-search` (or `COPILOT_ADAPTER_FORCE_DDG_WEB_SEARCH=1`) to make the adapter intercept `web_search` tool calls via DuckDuckGo even on the Claude path.
+**Supported OpenAI Responses models.** When an Anthropic request is mapped to an OpenAI Responses-only model that supports native web search (currently `gpt-5.4`), the adapter preserves native web search by sending `web_search_preview` upstream instead of intercepting it locally.
 
-**Non-Anthropic target path (DuckDuckGo fallback).** When a non-Claude model responds with a `web_search` tool call, the adapter intercepts it and executes the search server-side using [DuckDuckGo](https://github.com/deedy5/ddgs) (`ddgs` package). The search results are injected back into the conversation and the model continues generating a response.
+**Force-DDG override.** Set `--force-ddg-web-search` (or `COPILOT_ADAPTER_FORCE_DDG_WEB_SEARCH=1`) to disable provider-native web search and force DuckDuckGo interception wherever the adapter would otherwise preserve native search.
 
-For Anthropic clients, the adapter also emits Anthropic-native `server_tool_use` and `web_search_tool_result` content blocks so clients such as Claude Code can render structured web-search results instead of only seeing plain-text continuation output.
+For Anthropic clients, the adapter emits Anthropic-native `server_tool_use` and `web_search_tool_result` content blocks when it performs DDG interception, so clients such as Claude Code can render structured web-search results instead of only seeing plain-text continuation output.
 
 For non-Anthropic clients, the client still does not see the intermediate tool call.
 
-
-This enables web search for any model routed through the adapter, even if the client doesn't support executing web search tool calls. It works with both streaming and non-streaming requests.
+This enables web search even when the client doesn't execute web-search tool calls itself. It works with both streaming and non-streaming requests.
 
 If the model returns `web_search` alongside other tool calls, the adapter passes all tool calls through to the client instead of intercepting.
 
@@ -556,7 +555,7 @@ The model may call `web_search` multiple times in a single request (e.g. refinin
 
 Anthropic clients (e.g. Claude Code) may send built-in tool types like `web_search_20250305`, `text_editor_20250124`, and `code_execution_20250522`. The adapter handles them as follows:
 
-- **`web_search_*`** — Passed through natively to Copilot when the target model is Claude (Anthropic → Anthropic path); otherwise converted to a `web_search` function tool and [intercepted server-side](#server-side-web-search)
+- **`web_search_*`** — Converted to DDG-backed server-side interception for Claude targets; preserved as native `web_search_preview` only for supported OpenAI Responses targets; `--force-ddg-web-search` forces DDG interception instead
 - **Other built-in types** (e.g. `text_editor_*`, `code_execution_*`) — Stripped from the request, since these are handled client-side and don't need to be sent to the model
 
 ## Parameter compatibility

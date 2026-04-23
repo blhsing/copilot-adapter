@@ -135,6 +135,11 @@ def _should_use_responses_api(target_model: str) -> bool:
     return target_model in ("gpt-5.4",)
 
 
+def _supports_native_openai_web_search(target_model: str) -> bool:
+    """Return True when the target model can use OpenAI Responses web search."""
+    return target_model in ("gpt-5.4",)
+
+
 def _body_has_web_search_tool(body: dict) -> bool:
     """Return True when the request declares Anthropic's built-in web_search."""
     tools = body.get("tools")
@@ -1387,7 +1392,13 @@ async def handle_anthropic_via_responses(
     to support ``reasoning_effort`` with function tools.
     """
     resolved = initiator or anthropic_adapter.infer_initiator(body)
-    resp_body = _anthropic_to_responses(body)
+    resp_body = _anthropic_to_responses(
+        body,
+        preserve_native_web_search=(
+            _supports_native_openai_web_search(_apply_model_map(body.get("model", "")))
+            and not _force_ddg_web_search
+        ),
+    )
     resp_body["model"] = _apply_model_map(resp_body.get("model", ""))
     requested_model = resp_body.get("model", "")
 
@@ -1417,9 +1428,12 @@ async def handle_anthropic_via_responses(
 
     is_stream = body.get("stream")
 
-    # Check whether we should intercept web_search calls
+    # Keep OpenAI native web search enabled for supported Responses models
+    # unless force-DDG is explicitly requested.
     should_intercept_web_search = (
         _web_search_max_iterations > 0
+        and _force_ddg_web_search
+        and _supports_native_openai_web_search(requested_model)
         and any(
             t.get("function", {}).get("name") == "web_search"
             for t in resp_body.get("tools", [])
@@ -1995,20 +2009,20 @@ async def count_tokens(request: Request):
 async def messages(request: Request):
     body = await request.json()
     mapped_model = _apply_model_map(body.get("model", ""))
-    if _should_use_native_anthropic_api("anthropic", mapped_model) and not (
-        _force_ddg_web_search
-        and _web_search_max_iterations > 0
-        and _body_has_web_search_tool(body)
-    ):
-        # Copilot's /v1/messages supports Anthropic's native web_search_20250305
-        # server-side tool for Claude models, so we pass it through as-is.
-        # When --force-ddg-web-search is set (for orgs without the native
-        # web-search AI control enabled) and the request carries web_search,
-        # we fall through to the chat_completions path which intercepts via DDG.
-        body["model"] = mapped_model
-        return await handle_native_anthropic_messages(
-            body, request=request, initiator=_get_initiator(request)
+    has_web_search = _body_has_web_search_tool(body)
+
+    if _should_use_native_anthropic_api("anthropic", mapped_model):
+        # Claude-targeted Anthropic requests use DDG interception for web_search
+        # instead of Copilot's native Anthropic web_search passthrough.
+        if not has_web_search:
+            body["model"] = mapped_model
+            return await handle_native_anthropic_messages(
+                body, request=request, initiator=_get_initiator(request)
+            )
+        return await handle_chat_completion(
+            anthropic_adapter, body, request=request, initiator=_get_initiator(request)
         )
+
     if _should_use_responses_api(mapped_model):
         body["model"] = mapped_model
         return await handle_anthropic_via_responses(

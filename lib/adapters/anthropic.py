@@ -47,8 +47,8 @@ _BUILTIN_TOOL_SCHEMAS = {
 }
 
 
-def _convert_anthropic_tools(tools: list[dict]) -> list[dict]:
-    """Convert Anthropic tool definitions to OpenAI function tool format."""
+def _convert_anthropic_tools(tools: list[dict], *, preserve_native_web_search: bool = False) -> list[dict]:
+    """Convert Anthropic tool definitions to OpenAI-compatible tool format."""
     func_tools = []
     for t in tools:
         tool_type = t.get("type", "")
@@ -57,7 +57,10 @@ def _convert_anthropic_tools(tools: list[dict]) -> list[dict]:
             if tool_type.startswith(prefix):
                 builtin_key = prefix
                 break
-        if builtin_key:
+        if builtin_key == "web_search" and preserve_native_web_search:
+            logger.info("Preserving Anthropic built-in tool type=%s for native Responses web search", tool_type)
+            func_tools.append({"type": "web_search_preview"})
+        elif builtin_key:
             schema = _BUILTIN_TOOL_SCHEMAS[builtin_key]
             tool_name = t.get("name", builtin_key)
             logger.info(
@@ -264,7 +267,7 @@ def _anthropic_to_openai(body: dict) -> dict:
 # Request conversion: Anthropic -> OpenAI Responses API
 # ---------------------------------------------------------------------------
 
-def _anthropic_to_responses(body: dict) -> dict:
+def _anthropic_to_responses(body: dict, *, preserve_native_web_search: bool = True) -> dict:
     """Convert an Anthropic Messages body to an OpenAI Responses API body."""
     input_items: list[dict] = []
     tool_id_map: dict[str, str] = {}
@@ -315,11 +318,16 @@ def _anthropic_to_responses(body: dict) -> dict:
         result["stop"] = body["stop_sequences"]
 
     if "tools" in body:
-        func_tools = _convert_anthropic_tools(body["tools"])
+        func_tools = _convert_anthropic_tools(
+            body["tools"], preserve_native_web_search=preserve_native_web_search,
+        )
         # Responses API uses flat tool format: {type, name, description, parameters}
         # instead of chat/completions nested {type, function: {name, ...}}
         resp_tools = []
         for ft in func_tools:
+            if ft.get("type") == "web_search_preview":
+                resp_tools.append(ft)
+                continue
             fn = ft.get("function", {})
             resp_tools.append({
                 "type": "function",
