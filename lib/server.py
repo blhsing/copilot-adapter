@@ -32,6 +32,10 @@ _pending_stub_tasks: set[asyncio.Task] = set()
 _model_map: list[tuple[str, str]] = []
 _api_tokens: set[str] | None = None
 _web_search_max_iterations: int = 3
+# When true, web_search tool calls are intercepted and executed via DuckDuckGo
+# even when the target model is Anthropic (Claude). Useful for orgs that have
+# not enabled the Copilot native web-search AI control.
+_force_ddg_web_search: bool = False
 openai_adapter = OpenAIAdapter()
 anthropic_adapter = AnthropicAdapter()
 
@@ -129,6 +133,21 @@ def _should_use_responses_api(target_model: str) -> bool:
     on ``/v1/chat/completions`` and require ``/v1/responses`` instead.
     """
     return target_model in ("gpt-5.4",)
+
+
+def _body_has_web_search_tool(body: dict) -> bool:
+    """Return True when the request declares Anthropic's built-in web_search."""
+    tools = body.get("tools")
+    if not isinstance(tools, list):
+        return False
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        tool_type = str(tool.get("type", ""))
+        tool_name = str(tool.get("name", ""))
+        if tool_type.startswith("web_search") or tool_name == "web_search":
+            return True
+    return False
 
 
 def _target_prefers_max_completion_tokens(model: str) -> bool:
@@ -618,6 +637,7 @@ async def _lifespan(application: FastAPI):
     global _model_map
     global _api_tokens
     global _web_search_max_iterations
+    global _force_ddg_web_search
     tokens_raw = os.environ.get("_COPILOT_ADAPTER_GITHUB_TOKENS", "")
     if tokens_raw and account_mgr is None:
         _force_free = os.environ.get("_COPILOT_ADAPTER_FREE", "") == "1"
@@ -674,6 +694,7 @@ async def _lifespan(application: FastAPI):
         ws_max_raw = os.environ.get("_COPILOT_ADAPTER_WEB_SEARCH_MAX_ITERATIONS", "")
         if ws_max_raw:
             _web_search_max_iterations = int(ws_max_raw)
+        _force_ddg_web_search = os.environ.get("_COPILOT_ADAPTER_FORCE_DDG_WEB_SEARCH", "") == "1"
     yield
 
 
@@ -689,8 +710,9 @@ def init_app(
     model_map: list[tuple[str, str]] | None = None,
     api_tokens: list[str] | None = None,
     web_search_max_iterations: int = 1,
+    force_ddg_web_search: bool = False,
 ) -> FastAPI:
-    global account_mgr, _force_free, _free_within_minutes, _stub_bill, _stub_model, _model_map, _api_tokens, _web_search_max_iterations
+    global account_mgr, _force_free, _free_within_minutes, _stub_bill, _stub_model, _model_map, _api_tokens, _web_search_max_iterations, _force_ddg_web_search
     account_mgr = mgr
     _force_free = force_free
     _free_within_minutes = free_within_minutes
@@ -699,6 +721,7 @@ def init_app(
     _model_map = model_map if model_map is not None else load_default_model_map()
     _api_tokens = set(api_tokens) if api_tokens else None
     _web_search_max_iterations = web_search_max_iterations
+    _force_ddg_web_search = force_ddg_web_search
 
     if cors_origins:
         from fastapi.middleware.cors import CORSMiddleware
@@ -1972,11 +1995,16 @@ async def count_tokens(request: Request):
 async def messages(request: Request):
     body = await request.json()
     mapped_model = _apply_model_map(body.get("model", ""))
-    if _should_use_native_anthropic_api("anthropic", mapped_model):
+    if _should_use_native_anthropic_api("anthropic", mapped_model) and not (
+        _force_ddg_web_search
+        and _web_search_max_iterations > 0
+        and _body_has_web_search_tool(body)
+    ):
         # Copilot's /v1/messages supports Anthropic's native web_search_20250305
-        # server-side tool for Claude models, so we pass it through as-is instead
-        # of intercepting. DDG interception still applies when the target is a
-        # non-Anthropic model (handled further below).
+        # server-side tool for Claude models, so we pass it through as-is.
+        # When --force-ddg-web-search is set (for orgs without the native
+        # web-search AI control enabled) and the request carries web_search,
+        # we fall through to the chat_completions path which intercepts via DDG.
         body["model"] = mapped_model
         return await handle_native_anthropic_messages(
             body, request=request, initiator=_get_initiator(request)

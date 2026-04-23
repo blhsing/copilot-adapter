@@ -341,6 +341,11 @@ def config(tool: str, revert: bool, host: str, port: int,
               envvar="COPILOT_ADAPTER_WEB_SEARCH_ITERATIONS",
               help="Max web_search tool call iterations per request (default: 3). "
                    "Set to 0 to disable server-side web search interception.")
+@click.option("--force-ddg-web-search", is_flag=True, default=False,
+              envvar="COPILOT_ADAPTER_FORCE_DDG_WEB_SEARCH",
+              help="Use DuckDuckGo to intercept web_search calls even when the "
+                   "target model is Claude. Useful if your org has not enabled "
+                   "the Copilot native web-search AI control.")
 def serve(config_path: str | None, host: str | None, port: int | None,
           github_token: tuple[str, ...], cors_origin: tuple[str, ...],
           workers: int | None, strategy: str | None,
@@ -351,7 +356,8 @@ def serve(config_path: str | None, host: str | None, port: int | None,
           proxy_mode: bool,
           ca_dir: str | None, model_map_raw: tuple[str, ...],
           proxy_user: str | None, proxy_password: str | None,
-          api_token_raw: tuple[str, ...], web_search_iterations: int | None):
+          api_token_raw: tuple[str, ...], web_search_iterations: int | None,
+          force_ddg_web_search: bool):
     """Start the OpenAI-compatible API server."""
     import uvicorn
 
@@ -405,6 +411,7 @@ def serve(config_path: str | None, host: str | None, port: int | None,
     proxy_password = proxy_password or cfg.get("proxy_password")
     web_search_iterations = (web_search_iterations if web_search_iterations is not None
                              else cfg.get("web_search_iterations", 3))
+    force_ddg_web_search = force_ddg_web_search or cfg.get("force_ddg_web_search", False)
 
     # --- API tokens: CLI/env > config file > stored tokens ---
     api_tokens: list[str] | None = None
@@ -551,6 +558,8 @@ def serve(config_path: str | None, host: str | None, port: int | None,
         if log_file:
             os.environ["_COPILOT_ADAPTER_LOG_FILE"] = log_file
         os.environ["_COPILOT_ADAPTER_WEB_SEARCH_MAX_ITERATIONS"] = str(web_search_iterations)
+        if force_ddg_web_search:
+            os.environ["_COPILOT_ADAPTER_FORCE_DDG_WEB_SEARCH"] = "1"
 
         uvicorn.run(
             "lib.server:app", host=host, port=port,
@@ -567,7 +576,8 @@ def serve(config_path: str | None, host: str | None, port: int | None,
                                stub_model=stub_model,
                                model_map=model_map_list,
                                api_tokens=api_tokens,
-                               web_search_max_iterations=web_search_iterations)
+                               web_search_max_iterations=web_search_iterations,
+                               force_ddg_web_search=force_ddg_web_search)
         if proxy_mode:
             from lib.forward_proxy import DualModeServer
             dual = DualModeServer(
