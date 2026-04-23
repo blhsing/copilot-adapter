@@ -17,7 +17,7 @@ Authenticates via GitHub's device-flow OAuth (`ghu_` tokens), then proxies reque
 - [**One-command tool setup**](#tool-configuration) — Automatically configure popular agentic coding tools (Claude Code, Codex, Gemini CLI, OpenCode) to use this proxy, with easy revert to defaults
 - [**Configurable model mapping**](#model-mapping) — Built-in Claude model-ID normalization plus optional glob-pattern overrides
 - [**Cross-provider reasoning effort mapping**](#parameter-compatibility) — Preserves Anthropic thinking / `output_config.effort` when requests are mapped to OpenAI-style models, including Responses-only targets like `gpt-5.4`
-- [**Server-side web search**](#server-side-web-search) — Converts Anthropic's built-in `web_search` tool type to a function tool, intercepts it server-side via DuckDuckGo, and returns Anthropic-native structured search results to Anthropic clients; strips other unsupported built-in types
+- [**Server-side web search**](#server-side-web-search) — For Anthropic→Anthropic (Claude) requests, passes Anthropic's built-in `web_search_20250305` tool through to Copilot, which executes it server-side and returns Anthropic-native `server_tool_use`/`web_search_tool_result` blocks. For non-Anthropic target models, converts `web_search` to a function tool and intercepts it via DuckDuckGo; strips other unsupported built-in types.
 - **Streaming support** — Full SSE streaming across all three formats, including real-time format translation
 - [**Flexible authentication**](#authentication) — Interactive device-flow OAuth with cached tokens and multi-account support
 - **Multi-worker support** — Spawns multiple worker processes for higher throughput
@@ -532,7 +532,9 @@ export GEMINI_API_BASE=http://127.0.0.1:18080/v1beta
 
 ## Server-side web search
 
-When a model responds with a `web_search` tool call, the adapter intercepts it and executes the search server-side using [DuckDuckGo](https://github.com/deedy5/ddgs) (`ddgs` package). The search results are injected back into the conversation and the model continues generating a response.
+**Anthropic → Anthropic (Claude) path.** When the adapter routes through Copilot's native `/v1/messages` endpoint, Anthropic's built-in `web_search_20250305` tool is passed through unchanged; Copilot executes the search server-side and returns Anthropic-native `server_tool_use` + `web_search_tool_result` content blocks directly. No adapter-side interception happens.
+
+**Non-Anthropic target path (DuckDuckGo fallback).** When a non-Claude model responds with a `web_search` tool call, the adapter intercepts it and executes the search server-side using [DuckDuckGo](https://github.com/deedy5/ddgs) (`ddgs` package). The search results are injected back into the conversation and the model continues generating a response.
 
 For Anthropic clients, the adapter also emits Anthropic-native `server_tool_use` and `web_search_tool_result` content blocks so clients such as Claude Code can render structured web-search results instead of only seeing plain-text continuation output.
 
@@ -549,9 +551,9 @@ The model may call `web_search` multiple times in a single request (e.g. refinin
 
 ## Anthropic built-in tools
 
-Anthropic clients (e.g. Claude Code) may send built-in tool types like `web_search_20250305`, `text_editor_20250124`, and `code_execution_20250522`. The Copilot API doesn't support these type-prefixed tools. The adapter handles them as follows:
+Anthropic clients (e.g. Claude Code) may send built-in tool types like `web_search_20250305`, `text_editor_20250124`, and `code_execution_20250522`. The adapter handles them as follows:
 
-- **`web_search_*`** — Converted to a `web_search` function tool and [intercepted server-side](#server-side-web-search)
+- **`web_search_*`** — Passed through natively to Copilot when the target model is Claude (Anthropic → Anthropic path); otherwise converted to a `web_search` function tool and [intercepted server-side](#server-side-web-search)
 - **Other built-in types** (e.g. `text_editor_*`, `code_execution_*`) — Stripped from the request, since these are handled client-side and don't need to be sent to the model
 
 ## Parameter compatibility

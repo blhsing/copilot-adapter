@@ -131,23 +131,6 @@ def _should_use_responses_api(target_model: str) -> bool:
     return target_model in ("gpt-5.4",)
 
 
-def _anthropic_has_interceptable_web_search(body: dict) -> bool:
-    """Return True when an Anthropic request uses built-in web_search."""
-    if _web_search_max_iterations <= 0:
-        return False
-    tools = body.get("tools")
-    if not isinstance(tools, list):
-        return False
-    for tool in tools:
-        if not isinstance(tool, dict):
-            continue
-        tool_type = str(tool.get("type", ""))
-        tool_name = str(tool.get("name", ""))
-        if tool_type.startswith("web_search") or tool_name == "web_search":
-            return True
-    return False
-
-
 def _target_prefers_max_completion_tokens(model: str) -> bool:
     """Return True if *model* prefers ``max_completion_tokens`` instead of ``max_tokens``."""
     return _infer_provider_from_model(model) == "openai"
@@ -1989,10 +1972,11 @@ async def count_tokens(request: Request):
 async def messages(request: Request):
     body = await request.json()
     mapped_model = _apply_model_map(body.get("model", ""))
-    if (
-        _should_use_native_anthropic_api("anthropic", mapped_model)
-        and not _anthropic_has_interceptable_web_search(body)
-    ):
+    if _should_use_native_anthropic_api("anthropic", mapped_model):
+        # Copilot's /v1/messages supports Anthropic's native web_search_20250305
+        # server-side tool for Claude models, so we pass it through as-is instead
+        # of intercepting. DDG interception still applies when the target is a
+        # non-Anthropic model (handled further below).
         body["model"] = mapped_model
         return await handle_native_anthropic_messages(
             body, request=request, initiator=_get_initiator(request)
