@@ -212,6 +212,7 @@ All CLI options can be set via environment variables:
 | `--proxy-password` | `COPILOT_ADAPTER_PROXY_PASSWORD` | *(none)* |
 | `--api-token` | `COPILOT_ADAPTER_API_TOKEN` | stored tokens |
 | `--web-search-iterations` | `COPILOT_ADAPTER_WEB_SEARCH_ITERATIONS` | `3` |
+| `--force-ddg-web-search` | `COPILOT_ADAPTER_FORCE_DDG_WEB_SEARCH` | *(off)* |
 
 Set `NO_COLOR=1` to disable colored log output. Colors are auto-detected on Windows (requires Windows Terminal or VT-enabled console).
 
@@ -533,6 +534,8 @@ export GEMINI_API_BASE=http://127.0.0.1:18080/v1beta
 ## Server-side web search
 
 **Anthropic → Anthropic (Claude) path.** When the adapter routes through Copilot's native `/v1/messages` endpoint, Anthropic's built-in `web_search_20250305` tool is passed through unchanged; Copilot executes the search server-side and returns Anthropic-native `server_tool_use` + `web_search_tool_result` content blocks directly. No adapter-side interception happens.
+
+> Copilot's native web search is gated by the **"Web search tool"** setting in your organization's GitHub Copilot AI controls. If your org has not enabled it, native passthrough will fail. In that case, set `--force-ddg-web-search` (or `COPILOT_ADAPTER_FORCE_DDG_WEB_SEARCH=1`) to make the adapter intercept `web_search` tool calls via DuckDuckGo even on the Claude path.
 
 **Non-Anthropic target path (DuckDuckGo fallback).** When a non-Claude model responds with a `web_search` tool call, the adapter intercepts it and executes the search server-side using [DuckDuckGo](https://github.com/deedy5/ddgs) (`ddgs` package). The search results are injected back into the conversation and the model continues generating a response.
 
