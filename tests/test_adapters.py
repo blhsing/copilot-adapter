@@ -16,7 +16,7 @@ from lib.adapters.anthropic import (
 )
 from lib.client import CopilotClient
 from lib.server import (
-    _anthropic_has_interceptable_web_search,
+    _body_has_web_search_tool,
     _build_web_search_content_blocks,
     _build_web_search_sse_events,
     _execute_web_search_calls,
@@ -571,14 +571,14 @@ class TestAnthropicAdapter:
         assert sanitized["output_config"] == {"effort": "high"}
         assert "context_management" in body
 
-    def test_anthropic_has_interceptable_web_search(self):
-        assert _anthropic_has_interceptable_web_search({
+    def test_body_has_web_search_tool(self):
+        assert _body_has_web_search_tool({
             "tools": [{"type": "web_search_20250305", "name": "web_search"}],
         }) is True
-        assert _anthropic_has_interceptable_web_search({
+        assert _body_has_web_search_tool({
             "tools": [{"type": "function", "name": "Read"}],
         }) is False
-        assert _anthropic_has_interceptable_web_search({"messages": []}) is False
+        assert _body_has_web_search_tool({"messages": []}) is False
 
     @pytest.mark.asyncio
     async def test_stream_error_formatting(self):
