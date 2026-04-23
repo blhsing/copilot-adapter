@@ -939,11 +939,14 @@ async def _maybe_consume_billed_stub(client, resolved: str, requested_model: str
                 )
                 return
             await account_mgr.record_usage(client, _stub_model)
-            await account_mgr.record_request_time(client)
             logger.info("Stub-bill: billed %s in background", _stub_model)
         except Exception as e:
             logger.warning("Stub-bill background exception (%s)", e)
 
+    # Record the request time eagerly so a closely-following user request sees
+    # it via free-within-minutes and gets demoted to agent instead of firing a
+    # second redundant stub while this one is still in flight.
+    await account_mgr.record_request_time(client)
     task = asyncio.create_task(_run_stub())
     _pending_stub_tasks.add(task)
     task.add_done_callback(_pending_stub_tasks.discard)
