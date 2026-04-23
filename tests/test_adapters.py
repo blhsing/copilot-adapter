@@ -31,6 +31,7 @@ from lib.server import (
     _sanitize_native_anthropic_body,
     _should_use_native_anthropic_api,
     _should_use_responses_api,
+    _supports_native_openai_web_search,
 )
 
 
@@ -718,7 +719,20 @@ class TestAnthropicToResponses:
         assert result["tools"][0]["name"] == "Read"
         assert result["tools"][0]["type"] == "function"
         assert "function" not in result["tools"][0]  # flat format, not nested
-        assert result["tools"][1]["name"] == "web_search"
+        assert result["tools"][1]["type"] == "web_search_preview"
+
+    def test_tools_converted_force_ddg_mode(self):
+        body = {
+            "model": "test",
+            "max_tokens": 10,
+            "messages": [{"role": "user", "content": "Hi"}],
+            "tools": [
+                {"type": "web_search_20250305", "name": "web_search"},
+            ],
+        }
+        result = _anthropic_to_responses(body, preserve_native_web_search=False)
+        assert result["tools"][0]["type"] == "function"
+        assert result["tools"][0]["name"] == "web_search"
 
     def test_tool_choice_mapping(self):
         body = {
@@ -1034,6 +1048,11 @@ class TestResponsesStreamHelpers:
         assert _should_use_responses_api("gpt-5.4") is True
         assert _should_use_responses_api("gpt-4o") is False
         assert _should_use_responses_api("claude-opus-4-7") is False
+
+    def test_supports_native_openai_web_search(self):
+        assert _supports_native_openai_web_search("gpt-5.4") is True
+        assert _supports_native_openai_web_search("gpt-4o") is False
+        assert _supports_native_openai_web_search("claude-opus-4.7") is False
 
 
 # ===================================================================

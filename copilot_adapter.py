@@ -343,9 +343,10 @@ def config(tool: str, revert: bool, host: str, port: int,
                    "Set to 0 to disable server-side web search interception.")
 @click.option("--force-ddg-web-search", is_flag=True, default=False,
               envvar="COPILOT_ADAPTER_FORCE_DDG_WEB_SEARCH",
-              help="Use DuckDuckGo to intercept web_search calls even when the "
-                   "target model is Claude. Useful if your org has not enabled "
-                   "the Copilot native web-search AI control.")
+              help="Force DuckDuckGo interception for web_search calls instead of "
+                   "provider-native web search. By default, Claude-targeted "
+                   "requests use DDG and supported OpenAI Responses models keep "
+                   "native web search.")
 def serve(config_path: str | None, host: str | None, port: int | None,
           github_token: tuple[str, ...], cors_origin: tuple[str, ...],
           workers: int | None, strategy: str | None,
