@@ -36,6 +36,10 @@ _web_search_max_iterations: int = 3
 # even when the target model is Anthropic (Claude). Useful for orgs that have
 # not enabled the Copilot native web-search AI control.
 _force_ddg_web_search: bool = False
+# When set (e.g. to "gpt-5.4"), Claude-targeted Anthropic requests that carry
+# the web_search tool are rerouted through /v1/responses against this model so
+# they use the provider-native web_search_preview tool instead of DDG.
+_claude_web_search_model: str | None = None
 openai_adapter = OpenAIAdapter()
 anthropic_adapter = AnthropicAdapter()
 
@@ -643,6 +647,7 @@ async def _lifespan(application: FastAPI):
     global _api_tokens
     global _web_search_max_iterations
     global _force_ddg_web_search
+    global _claude_web_search_model
     tokens_raw = os.environ.get("_COPILOT_ADAPTER_GITHUB_TOKENS", "")
     if tokens_raw and account_mgr is None:
         _force_free = os.environ.get("_COPILOT_ADAPTER_FREE", "") == "1"
@@ -700,6 +705,7 @@ async def _lifespan(application: FastAPI):
         if ws_max_raw:
             _web_search_max_iterations = int(ws_max_raw)
         _force_ddg_web_search = os.environ.get("_COPILOT_ADAPTER_FORCE_DDG_WEB_SEARCH", "") == "1"
+        _claude_web_search_model = os.environ.get("_COPILOT_ADAPTER_CLAUDE_WEB_SEARCH_MODEL") or None
     yield
 
 
@@ -716,8 +722,9 @@ def init_app(
     api_tokens: list[str] | None = None,
     web_search_max_iterations: int = 1,
     force_ddg_web_search: bool = False,
+    claude_web_search_model: str | None = None,
 ) -> FastAPI:
-    global account_mgr, _force_free, _free_within_minutes, _stub_bill, _stub_model, _model_map, _api_tokens, _web_search_max_iterations, _force_ddg_web_search
+    global account_mgr, _force_free, _free_within_minutes, _stub_bill, _stub_model, _model_map, _api_tokens, _web_search_max_iterations, _force_ddg_web_search, _claude_web_search_model
     account_mgr = mgr
     _force_free = force_free
     _free_within_minutes = free_within_minutes
@@ -727,6 +734,7 @@ def init_app(
     _api_tokens = set(api_tokens) if api_tokens else None
     _web_search_max_iterations = web_search_max_iterations
     _force_ddg_web_search = force_ddg_web_search
+    _claude_web_search_model = claude_web_search_model or None
 
     if cors_origins:
         from fastapi.middleware.cors import CORSMiddleware
@@ -2017,6 +2025,22 @@ async def messages(request: Request):
         if not has_web_search:
             body["model"] = mapped_model
             return await handle_native_anthropic_messages(
+                body, request=request, initiator=_get_initiator(request)
+            )
+        # If the operator opted into native web search for Claude requests,
+        # reroute to /v1/responses against the configured model (e.g. gpt-5.4)
+        # so the upstream call uses web_search_preview instead of DDG.
+        if (
+            _claude_web_search_model
+            and not _force_ddg_web_search
+            and _supports_native_openai_web_search(_claude_web_search_model)
+        ):
+            logger.info(
+                "Claude web_search: rerouting to %s via Responses for native web search",
+                _claude_web_search_model,
+            )
+            body["model"] = _claude_web_search_model
+            return await handle_anthropic_via_responses(
                 body, request=request, initiator=_get_initiator(request)
             )
         return await handle_chat_completion(

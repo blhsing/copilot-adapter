@@ -213,6 +213,7 @@ All CLI options can be set via environment variables:
 | `--api-token` | `COPILOT_ADAPTER_API_TOKEN` | stored tokens |
 | `--web-search-iterations` | `COPILOT_ADAPTER_WEB_SEARCH_ITERATIONS` | `3` |
 | `--force-ddg-web-search` | `COPILOT_ADAPTER_FORCE_DDG_WEB_SEARCH` | *(off)* |
+| `--claude-web-search-model` | `COPILOT_ADAPTER_CLAUDE_WEB_SEARCH_MODEL` | *(none)* |
 
 Set `NO_COLOR=1` to disable colored log output. Colors are auto-detected on Windows (requires Windows Terminal or VT-enabled console).
 
@@ -538,6 +539,8 @@ export GEMINI_API_BASE=http://127.0.0.1:18080/v1beta
 **Supported OpenAI Responses models.** When an Anthropic request is mapped to an OpenAI Responses-only model that supports native web search (currently `gpt-5.4`), the adapter preserves native web search by sending `web_search_preview` upstream instead of intercepting it locally.
 
 **Force-DDG override.** Set `--force-ddg-web-search` (or `COPILOT_ADAPTER_FORCE_DDG_WEB_SEARCH=1`) to disable provider-native web search and force DuckDuckGo interception wherever the adapter would otherwise preserve native search.
+
+**Native web search for Claude via another model.** Set `--claude-web-search-model MODEL` (e.g. `gpt-5.4`, or `COPILOT_ADAPTER_CLAUDE_WEB_SEARCH_MODEL=gpt-5.4`) to reroute Claude-targeted Anthropic requests that carry `web_search_20250305` through `/v1/responses` against `MODEL`. The upstream call then uses OpenAI's native `web_search_preview` tool instead of DuckDuckGo. `--force-ddg-web-search` overrides this; if `MODEL` does not support native web search the option is ignored.
 
 For Anthropic clients, the adapter emits Anthropic-native `server_tool_use` and `web_search_tool_result` content blocks when it performs DDG interception, so clients such as Claude Code can render structured web-search results instead of only seeing plain-text continuation output.
 
