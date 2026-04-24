@@ -873,6 +873,72 @@ class TestResponsesToAnthropic:
         assert len(result["content"]) == 1
         assert result["content"][0] == {"type": "text", "text": ""}
 
+    def test_web_search_call_with_citations(self):
+        resp = {
+            "output": [
+                {
+                    "type": "web_search_call",
+                    "id": "ws_1",
+                    "action": {"type": "search", "query": "weather Taipei"},
+                    "status": "completed",
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{
+                        "type": "output_text",
+                        "text": "Taipei is cloudy.",
+                        "annotations": [
+                            {
+                                "type": "url_citation",
+                                "url": "https://example.com/a",
+                                "title": "Example A",
+                                "start_index": 0,
+                                "end_index": 5,
+                            },
+                            {
+                                "type": "url_citation",
+                                "url": "https://example.com/b",
+                                "title": "Example B",
+                                "start_index": 6,
+                                "end_index": 12,
+                            },
+                        ],
+                    }],
+                },
+            ],
+            "status": "completed",
+            "usage": {"input_tokens": 3, "output_tokens": 4},
+        }
+        result = _responses_to_anthropic(resp, "gpt-5.4")
+        types = [b["type"] for b in result["content"]]
+        assert types == ["server_tool_use", "web_search_tool_result", "text"]
+        assert result["content"][0]["name"] == "web_search"
+        assert result["content"][0]["input"] == {"query": "weather Taipei"}
+        assert result["content"][1]["tool_use_id"] == result["content"][0]["id"]
+        assert [c["url"] for c in result["content"][1]["content"]] == [
+            "https://example.com/a",
+            "https://example.com/b",
+        ]
+        assert result["content"][2]["text"] == "Taipei is cloudy."
+        # web_search_call doesn't count as a function_call, so stop is end_turn
+        assert result["stop_reason"] == "end_turn"
+
+    def test_web_search_call_without_citations_emits_empty_result(self):
+        resp = {
+            "output": [
+                {"type": "web_search_call", "id": "ws_1", "action": {"query": "x"}},
+            ],
+            "status": "completed",
+            "usage": {},
+        }
+        result = _responses_to_anthropic(resp, "gpt-5.4")
+        types = [b["type"] for b in result["content"]]
+        assert "server_tool_use" in types
+        assert "web_search_tool_result" in types
+        tool_result = next(b for b in result["content"] if b["type"] == "web_search_tool_result")
+        assert tool_result["content"] == []
+
 
 class TestAnthropicResponsesStreamConverter:
     def _make_sse(self, event_type: str, data: dict) -> list[str]:
@@ -1012,6 +1078,83 @@ class TestAnthropicResponsesStreamConverter:
         err = converter.format_error("error: 500 internal")
         assert err.startswith("event: error\n")
         assert "500" in err
+
+    def test_web_search_flow(self):
+        converter = _AnthropicResponsesStreamConverter("gpt-5.4")
+        output = ""
+        for line in self._make_sse("response.created", {
+            "type": "response.created",
+            "response": {"id": "resp_1", "model": "gpt-5.4"},
+        }):
+            output += converter.feed(line)
+        for line in self._make_sse("response.output_item.added", {
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": {"type": "web_search_call", "id": "ws_1", "status": "in_progress"},
+        }):
+            output += converter.feed(line)
+        for line in self._make_sse("response.output_item.done", {
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": {
+                "type": "web_search_call", "id": "ws_1",
+                "status": "completed",
+                "action": {"type": "search", "query": "taipei weather"},
+            },
+        }):
+            output += converter.feed(line)
+        for line in self._make_sse("response.content_part.added", {
+            "type": "response.content_part.added",
+            "output_index": 1, "content_index": 0,
+            "part": {"type": "output_text", "text": ""},
+        }):
+            output += converter.feed(line)
+        for line in self._make_sse("response.output_text.delta", {
+            "type": "response.output_text.delta",
+            "output_index": 1, "content_index": 0,
+            "delta": "It is cloudy.",
+        }):
+            output += converter.feed(line)
+        for line in self._make_sse("response.output_text.annotation.added", {
+            "type": "response.output_text.annotation.added",
+            "annotation": {
+                "type": "url_citation",
+                "url": "https://example.com/a",
+                "title": "A",
+            },
+        }):
+            output += converter.feed(line)
+        for line in self._make_sse("response.content_part.done", {
+            "type": "response.content_part.done",
+            "output_index": 1, "content_index": 0,
+            "part": {"type": "output_text", "text": "It is cloudy.", "annotations": []},
+        }):
+            output += converter.feed(line)
+        for line in self._make_sse("response.completed", {
+            "type": "response.completed",
+            "response": {
+                "id": "resp_1", "status": "completed",
+                "output": [
+                    {"type": "web_search_call", "id": "ws_1",
+                     "action": {"query": "taipei weather"}},
+                    {"type": "message", "content": [
+                        {"type": "output_text", "text": "It is cloudy.",
+                         "annotations": [
+                             {"type": "url_citation", "url": "https://example.com/a", "title": "A"},
+                         ]},
+                    ]},
+                ],
+                "usage": {"input_tokens": 3, "output_tokens": 4},
+            },
+        }):
+            output += converter.feed(line)
+
+        assert "server_tool_use" in output
+        assert "taipei weather" in output
+        assert "web_search_tool_result" in output
+        assert "https://example.com/a" in output
+        assert "end_turn" in output
+        assert "message_stop" in output
 
 
 class TestResponsesStreamHelpers:
