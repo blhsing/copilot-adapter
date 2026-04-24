@@ -361,6 +361,14 @@ def config(tool: str, revert: bool, host: str, port: int,
               help="DNS server (IP or hostname) to use for reverse lookups "
                    "when logging the originating client as a hostname. "
                    "Defaults to the system resolver.")
+@click.option("--forwarded-allow-ips", default=None, metavar="IPS",
+              envvar="COPILOT_ADAPTER_FORWARDED_ALLOW_IPS",
+              help="Comma-separated IPs (or '*') whose X-Forwarded-For / "
+                   "X-Forwarded-Proto headers are trusted to rewrite the "
+                   "logged client address to the true originating host. "
+                   "Defaults to 127.0.0.1; set to the IP of your front proxy "
+                   "(e.g. a Squid host) or '*' to honor the header from "
+                   "anywhere.")
 def serve(config_path: str | None, host: str | None, port: int | None,
           github_token: tuple[str, ...], cors_origin: tuple[str, ...],
           workers: int | None, strategy: str | None,
@@ -374,7 +382,8 @@ def serve(config_path: str | None, host: str | None, port: int | None,
           api_token_raw: tuple[str, ...], web_search_iterations: int | None,
           force_ddg_web_search: bool,
           web_search_model: str | None,
-          reverse_dns_server: str | None):
+          reverse_dns_server: str | None,
+          forwarded_allow_ips: str | None):
     """Start the OpenAI-compatible API server."""
     import uvicorn
 
@@ -431,6 +440,7 @@ def serve(config_path: str | None, host: str | None, port: int | None,
     force_ddg_web_search = force_ddg_web_search or cfg.get("force_ddg_web_search", False)
     web_search_model = web_search_model or cfg.get("web_search_model")
     reverse_dns_server = reverse_dns_server or cfg.get("reverse_dns_server")
+    forwarded_allow_ips = forwarded_allow_ips or cfg.get("forwarded_allow_ips")
 
     # --- API tokens: CLI/env > config file > stored tokens ---
     api_tokens: list[str] | None = None
@@ -590,6 +600,7 @@ def serve(config_path: str | None, host: str | None, port: int | None,
             timeout_graceful_shutdown=5,
             use_colors=_supports_color(),
             log_config=logging_config,
+            forwarded_allow_ips=forwarded_allow_ips,
         )
     else:
         application = init_app(acct_mgr, cors_origins=list(cors_origin) or None,
@@ -619,7 +630,8 @@ def serve(config_path: str | None, host: str | None, port: int | None,
             uvicorn.run(application, host=host, port=port, log_level=log_level,
                         timeout_graceful_shutdown=5,
                         use_colors=_supports_color(),
-                        log_config=logging_config)
+                        log_config=logging_config,
+                        forwarded_allow_ips=forwarded_allow_ips)
 
 
 if __name__ == "__main__":
