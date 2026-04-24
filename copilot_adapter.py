@@ -356,6 +356,11 @@ def config(tool: str, revert: bool, host: str, port: int,
                    "web_search_preview instead of DuckDuckGo. Ignored when "
                    "--force-ddg-web-search is set or MODEL does not support "
                    "native web search.")
+@click.option("--reverse-dns-server", default=None, metavar="HOST",
+              envvar="COPILOT_ADAPTER_REVERSE_DNS_SERVER",
+              help="DNS server (IP or hostname) to use for reverse lookups "
+                   "when logging the originating client as a hostname. "
+                   "Defaults to the system resolver.")
 def serve(config_path: str | None, host: str | None, port: int | None,
           github_token: tuple[str, ...], cors_origin: tuple[str, ...],
           workers: int | None, strategy: str | None,
@@ -368,7 +373,8 @@ def serve(config_path: str | None, host: str | None, port: int | None,
           proxy_user: str | None, proxy_password: str | None,
           api_token_raw: tuple[str, ...], web_search_iterations: int | None,
           force_ddg_web_search: bool,
-          web_search_model: str | None):
+          web_search_model: str | None,
+          reverse_dns_server: str | None):
     """Start the OpenAI-compatible API server."""
     import uvicorn
 
@@ -424,6 +430,7 @@ def serve(config_path: str | None, host: str | None, port: int | None,
                              else cfg.get("web_search_iterations", 3))
     force_ddg_web_search = force_ddg_web_search or cfg.get("force_ddg_web_search", False)
     web_search_model = web_search_model or cfg.get("web_search_model")
+    reverse_dns_server = reverse_dns_server or cfg.get("reverse_dns_server")
 
     # --- API tokens: CLI/env > config file > stored tokens ---
     api_tokens: list[str] | None = None
@@ -533,7 +540,7 @@ def serve(config_path: str | None, host: str | None, port: int | None,
     print(f"\nStarting server on http://{host}:{port}\n")
 
     from uvicorn.config import LOGGING_CONFIG
-    logging_config = build_runtime_logging_config(LOGGING_CONFIG, log_level, log_file)
+    logging_config = build_runtime_logging_config(LOGGING_CONFIG, log_level, log_file, reverse_dns_server)
 
     if proxy_mode and workers > 1:
         print("Warning: --proxy mode is not compatible with multiple workers, using 1 worker")
@@ -574,6 +581,8 @@ def serve(config_path: str | None, host: str | None, port: int | None,
             os.environ["_COPILOT_ADAPTER_FORCE_DDG_WEB_SEARCH"] = "1"
         if web_search_model:
             os.environ["_COPILOT_ADAPTER_WEB_SEARCH_MODEL"] = web_search_model
+        if reverse_dns_server:
+            os.environ["_COPILOT_ADAPTER_REVERSE_DNS_SERVER"] = reverse_dns_server
 
         uvicorn.run(
             "lib.server:app", host=host, port=port,
