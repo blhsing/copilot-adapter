@@ -5,3 +5,4 @@ orjson>=3.10
 click>=8.1
 cryptography>=42.0
 ddgs>=9.0
+dnspython>=2.6

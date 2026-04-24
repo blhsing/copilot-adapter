@@ -214,10 +214,13 @@ All CLI options can be set via environment variables:
 | `--web-search-iterations` | `COPILOT_ADAPTER_WEB_SEARCH_ITERATIONS` | `3` |
 | `--force-ddg-web-search` | `COPILOT_ADAPTER_FORCE_DDG_WEB_SEARCH` | *(off)* |
 | `--web-search-model` | `COPILOT_ADAPTER_WEB_SEARCH_MODEL` | *(none)* |
+| `--reverse-dns-server` | `COPILOT_ADAPTER_REVERSE_DNS_SERVER` | *(system resolver)* |
 
 Set `NO_COLOR=1` to disable colored log output. Colors are auto-detected on Windows (requires Windows Terminal or VT-enabled console).
 
 Use `--log-file /path/to/copilot-adapter.log` (or `log_file` in the config file) to append the same logs to a file while keeping console output enabled.
+
+Access log lines show the originating client as `hostname (ip:port)` when a reverse DNS lookup succeeds, and fall back to the raw `ip:port` otherwise. Lookups run asynchronously on a background thread and are cached per IP, so the first request from a new address is logged with just the IP while the resolution is in flight. Use `--reverse-dns-server` (or `COPILOT_ADAPTER_REVERSE_DNS_SERVER`) to point the lookups at a specific DNS server — useful when the system resolver can't see an internal zone that maps the originating hosts. The client address is whatever the TCP peer is; if requests arrive through an HTTP proxy such as Squid, that is the proxy's address, not the end user's.
 
 `GITHUB_TOKEN` is also accepted as a fallback for the GitHub token. Multiple tokens can be comma-separated in `COPILOT_ADAPTER_GITHUB_TOKEN` or `GITHUB_TOKEN`.
 
