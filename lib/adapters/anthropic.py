@@ -506,15 +506,51 @@ _RESPONSES_STATUS_MAP = {
 }
 
 
+def _url_citation_to_search_result(ann: dict) -> dict:
+    """Convert an OpenAI url_citation annotation to an Anthropic web_search_result block."""
+    return {
+        "type": "web_search_result",
+        "url": ann.get("url", ""),
+        "title": ann.get("title", ""),
+        "encrypted_content": "",
+        "page_age": "",
+    }
+
+
 def _responses_to_anthropic(resp: dict, model: str) -> dict:
     """Convert an OpenAI Responses API response to Anthropic Messages format."""
     content: list[dict] = []
     has_function_calls = False
+    pending_search_ids: list[str] = []
 
     for item in resp.get("output", []):
         item_type = item.get("type", "")
 
-        if item_type == "message":
+        if item_type == "web_search_call":
+            tool_id = item.get("id") or f"srvtoolu_{uuid.uuid4().hex[:24]}"
+            action = item.get("action") or {}
+            query = action.get("query") or item.get("query", "")
+            content.append({
+                "type": "server_tool_use",
+                "id": tool_id,
+                "name": "web_search",
+                "input": {"query": query} if query else {},
+            })
+            pending_search_ids.append(tool_id)
+
+        elif item_type == "message":
+            citations: list[dict] = []
+            for part in item.get("content", []):
+                for ann in part.get("annotations") or []:
+                    if ann.get("type") == "url_citation":
+                        citations.append(_url_citation_to_search_result(ann))
+            if pending_search_ids:
+                tool_id = pending_search_ids.pop(0)
+                content.append({
+                    "type": "web_search_tool_result",
+                    "tool_use_id": tool_id,
+                    "content": citations,
+                })
             for part in item.get("content", []):
                 part_type = part.get("type", "")
                 if part_type == "output_text":
@@ -537,6 +573,15 @@ def _responses_to_anthropic(resp: dict, model: str) -> dict:
                 "name": name,
                 "input": input_obj,
             })
+
+    # Any web_search_call not followed by a citing message still needs a
+    # matching web_search_tool_result block so the pair is well-formed.
+    for tool_id in pending_search_ids:
+        content.append({
+            "type": "web_search_tool_result",
+            "tool_use_id": tool_id,
+            "content": [],
+        })
 
     if not content:
         content.append({"type": "text", "text": ""})
@@ -578,9 +623,22 @@ class _AnthropicResponsesStreamConverter(StreamConverter):
         self._input_tokens = 0
         self._output_tokens = 0
         self._stop_reason: str | None = None
+        # Track pending native web_search_call → citation pairs so we can emit
+        # matching web_search_tool_result blocks at the end of the stream.
+        self._pending_searches: list[dict] = []
+        self._last_web_search_tool_id: str | None = None
 
     def _event(self, event_type: str, data: dict) -> str:
         return f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
+
+    def _record_url_citation(self, ann: dict) -> None:
+        """Attach a url_citation annotation to the most recent web_search_call."""
+        if not self._pending_searches:
+            return
+        target = self._pending_searches[-1]
+        result = _url_citation_to_search_result(ann)
+        if result not in target["citations"]:
+            target["citations"].append(result)
 
     def format_error(self, error_line: str) -> str:
         return f"event: error\ndata: {error_line}\n\n"
@@ -681,6 +739,28 @@ class _AnthropicResponsesStreamConverter(StreamConverter):
                         "input": {},
                     },
                 })
+            elif item.get("type") == "web_search_call":
+                if self._block_started:
+                    output += self._event("content_block_stop", {
+                        "type": "content_block_stop",
+                        "index": self._block_index,
+                    })
+                    self._block_index += 1
+                    self._block_started = False
+                tool_id = item.get("id") or f"srvtoolu_{uuid.uuid4().hex[:24]}"
+                self._last_web_search_tool_id = tool_id
+                self._pending_searches.append({"tool_id": tool_id, "citations": []})
+                output += self._event("content_block_start", {
+                    "type": "content_block_start",
+                    "index": self._block_index,
+                    "content_block": {
+                        "type": "server_tool_use",
+                        "id": tool_id,
+                        "name": "web_search",
+                        "input": {},
+                    },
+                })
+                self._block_started = True
 
         elif event_type == "response.function_call_arguments.delta":
             args_chunk = data.get("delta", "")
@@ -705,8 +785,37 @@ class _AnthropicResponsesStreamConverter(StreamConverter):
                     self._block_started = False
                     self._block_index += 1
                 self._stop_reason = "tool_use"
+            elif item.get("type") == "web_search_call":
+                action = item.get("action") or {}
+                query = action.get("query") or item.get("query", "")
+                if query:
+                    output += self._event("content_block_delta", {
+                        "type": "content_block_delta",
+                        "index": self._block_index,
+                        "delta": {
+                            "type": "input_json_delta",
+                            "partial_json": json.dumps({"query": query}),
+                        },
+                    })
+                if self._block_started:
+                    output += self._event("content_block_stop", {
+                        "type": "content_block_stop",
+                        "index": self._block_index,
+                    })
+                    self._block_started = False
+                    self._block_index += 1
+            elif item.get("type") == "message":
+                # Final annotations may only be present on the done event.
+                for part in item.get("content") or []:
+                    for ann in part.get("annotations") or []:
+                        if ann.get("type") == "url_citation":
+                            self._record_url_citation(ann)
 
         elif event_type == "response.content_part.done":
+            part = data.get("part") or {}
+            for ann in part.get("annotations") or []:
+                if ann.get("type") == "url_citation":
+                    self._record_url_citation(ann)
             if self._block_started:
                 output += self._event("content_block_stop", {
                     "type": "content_block_stop",
@@ -714,6 +823,14 @@ class _AnthropicResponsesStreamConverter(StreamConverter):
                 })
                 self._block_started = False
                 self._block_index += 1
+
+        elif event_type in (
+            "response.output_text.annotation.added",
+            "response.output_text_annotation.added",
+        ):
+            ann = data.get("annotation") or {}
+            if ann.get("type") == "url_citation":
+                self._record_url_citation(ann)
 
         elif event_type == "response.completed":
             resp = data.get("response", {})
@@ -727,6 +844,49 @@ class _AnthropicResponsesStreamConverter(StreamConverter):
                     "index": self._block_index,
                 })
                 self._block_started = False
+                self._block_index += 1
+
+            # Fallback: if the stream never surfaced annotations individually,
+            # pull them from the completed response's message content.
+            if self._pending_searches and any(
+                not s["citations"] for s in self._pending_searches
+            ):
+                for item in resp.get("output") or []:
+                    if item.get("type") != "message":
+                        continue
+                    for part in item.get("content") or []:
+                        for ann in part.get("annotations") or []:
+                            if ann.get("type") == "url_citation":
+                                self._record_url_citation(ann)
+
+            # Emit a web_search_tool_result block for each pending search.
+            for search in self._pending_searches:
+                tool_id = search["tool_id"]
+                citations = search["citations"]
+                output += self._event("content_block_start", {
+                    "type": "content_block_start",
+                    "index": self._block_index,
+                    "content_block": {
+                        "type": "web_search_tool_result",
+                        "tool_use_id": tool_id,
+                        "content": [],
+                    },
+                })
+                if citations:
+                    output += self._event("content_block_delta", {
+                        "type": "content_block_delta",
+                        "index": self._block_index,
+                        "delta": {
+                            "type": "web_search_result_delta",
+                            "search_results": citations,
+                        },
+                    })
+                output += self._event("content_block_stop", {
+                    "type": "content_block_stop",
+                    "index": self._block_index,
+                })
+                self._block_index += 1
+            self._pending_searches = []
 
             # Derive stop reason from response status
             status = resp.get("status", "completed")
