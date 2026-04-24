@@ -347,13 +347,15 @@ def config(tool: str, revert: bool, host: str, port: int,
                    "provider-native web search. By default, Claude-targeted "
                    "requests use DDG and supported OpenAI Responses models keep "
                    "native web search.")
-@click.option("--claude-web-search-model", default=None, metavar="MODEL",
-              envvar="COPILOT_ADAPTER_CLAUDE_WEB_SEARCH_MODEL",
-              help="Reroute Claude-targeted Anthropic requests that carry the "
+@click.option("--web-search-model", default=None, metavar="MODEL",
+              envvar="COPILOT_ADAPTER_WEB_SEARCH_MODEL",
+              help="Reroute Anthropic /v1/messages requests that carry the "
                    "web_search tool through /v1/responses against MODEL (e.g. "
-                   "gpt-5.4) so the upstream call uses native web_search_preview "
-                   "instead of DuckDuckGo. Ignored when --force-ddg-web-search "
-                   "is set or MODEL does not support native web search.")
+                   "gpt-5.4) whenever the target model lacks native provider "
+                   "web search, so the upstream call uses native "
+                   "web_search_preview instead of DuckDuckGo. Ignored when "
+                   "--force-ddg-web-search is set or MODEL does not support "
+                   "native web search.")
 def serve(config_path: str | None, host: str | None, port: int | None,
           github_token: tuple[str, ...], cors_origin: tuple[str, ...],
           workers: int | None, strategy: str | None,
@@ -366,7 +368,7 @@ def serve(config_path: str | None, host: str | None, port: int | None,
           proxy_user: str | None, proxy_password: str | None,
           api_token_raw: tuple[str, ...], web_search_iterations: int | None,
           force_ddg_web_search: bool,
-          claude_web_search_model: str | None):
+          web_search_model: str | None):
     """Start the OpenAI-compatible API server."""
     import uvicorn
 
@@ -421,7 +423,7 @@ def serve(config_path: str | None, host: str | None, port: int | None,
     web_search_iterations = (web_search_iterations if web_search_iterations is not None
                              else cfg.get("web_search_iterations", 3))
     force_ddg_web_search = force_ddg_web_search or cfg.get("force_ddg_web_search", False)
-    claude_web_search_model = claude_web_search_model or cfg.get("claude_web_search_model")
+    web_search_model = web_search_model or cfg.get("web_search_model")
 
     # --- API tokens: CLI/env > config file > stored tokens ---
     api_tokens: list[str] | None = None
@@ -570,8 +572,8 @@ def serve(config_path: str | None, host: str | None, port: int | None,
         os.environ["_COPILOT_ADAPTER_WEB_SEARCH_MAX_ITERATIONS"] = str(web_search_iterations)
         if force_ddg_web_search:
             os.environ["_COPILOT_ADAPTER_FORCE_DDG_WEB_SEARCH"] = "1"
-        if claude_web_search_model:
-            os.environ["_COPILOT_ADAPTER_CLAUDE_WEB_SEARCH_MODEL"] = claude_web_search_model
+        if web_search_model:
+            os.environ["_COPILOT_ADAPTER_WEB_SEARCH_MODEL"] = web_search_model
 
         uvicorn.run(
             "lib.server:app", host=host, port=port,
@@ -590,7 +592,7 @@ def serve(config_path: str | None, host: str | None, port: int | None,
                                api_tokens=api_tokens,
                                web_search_max_iterations=web_search_iterations,
                                force_ddg_web_search=force_ddg_web_search,
-                               claude_web_search_model=claude_web_search_model)
+                               web_search_model=web_search_model)
         if proxy_mode:
             from lib.forward_proxy import DualModeServer
             dual = DualModeServer(

@@ -36,10 +36,11 @@ _web_search_max_iterations: int = 3
 # even when the target model is Anthropic (Claude). Useful for orgs that have
 # not enabled the Copilot native web-search AI control.
 _force_ddg_web_search: bool = False
-# When set (e.g. to "gpt-5.4"), Claude-targeted Anthropic requests that carry
-# the web_search tool are rerouted through /v1/responses against this model so
-# they use the provider-native web_search_preview tool instead of DDG.
-_claude_web_search_model: str | None = None
+# When set (e.g. to "gpt-5.4"), Anthropic /v1/messages requests whose target
+# model lacks native provider web search are rerouted through /v1/responses
+# against this model so they use the provider-native web_search_preview tool
+# instead of DuckDuckGo.
+_web_search_model: str | None = None
 openai_adapter = OpenAIAdapter()
 anthropic_adapter = AnthropicAdapter()
 
@@ -647,7 +648,7 @@ async def _lifespan(application: FastAPI):
     global _api_tokens
     global _web_search_max_iterations
     global _force_ddg_web_search
-    global _claude_web_search_model
+    global _web_search_model
     tokens_raw = os.environ.get("_COPILOT_ADAPTER_GITHUB_TOKENS", "")
     if tokens_raw and account_mgr is None:
         _force_free = os.environ.get("_COPILOT_ADAPTER_FREE", "") == "1"
@@ -705,7 +706,7 @@ async def _lifespan(application: FastAPI):
         if ws_max_raw:
             _web_search_max_iterations = int(ws_max_raw)
         _force_ddg_web_search = os.environ.get("_COPILOT_ADAPTER_FORCE_DDG_WEB_SEARCH", "") == "1"
-        _claude_web_search_model = os.environ.get("_COPILOT_ADAPTER_CLAUDE_WEB_SEARCH_MODEL") or None
+        _web_search_model = os.environ.get("_COPILOT_ADAPTER_WEB_SEARCH_MODEL") or None
     yield
 
 
@@ -722,9 +723,9 @@ def init_app(
     api_tokens: list[str] | None = None,
     web_search_max_iterations: int = 1,
     force_ddg_web_search: bool = False,
-    claude_web_search_model: str | None = None,
+    web_search_model: str | None = None,
 ) -> FastAPI:
-    global account_mgr, _force_free, _free_within_minutes, _stub_bill, _stub_model, _model_map, _api_tokens, _web_search_max_iterations, _force_ddg_web_search, _claude_web_search_model
+    global account_mgr, _force_free, _free_within_minutes, _stub_bill, _stub_model, _model_map, _api_tokens, _web_search_max_iterations, _force_ddg_web_search, _web_search_model
     account_mgr = mgr
     _force_free = force_free
     _free_within_minutes = free_within_minutes
@@ -734,7 +735,7 @@ def init_app(
     _api_tokens = set(api_tokens) if api_tokens else None
     _web_search_max_iterations = web_search_max_iterations
     _force_ddg_web_search = force_ddg_web_search
-    _claude_web_search_model = claude_web_search_model or None
+    _web_search_model = web_search_model or None
 
     if cors_origins:
         from fastapi.middleware.cors import CORSMiddleware
@@ -2019,6 +2020,17 @@ async def messages(request: Request):
     mapped_model = _apply_model_map(body.get("model", ""))
     has_web_search = _body_has_web_search_tool(body)
 
+    # If the operator configured a web-search model and the mapped target lacks
+    # native provider web search, reroute through /v1/responses against that
+    # model so the upstream call uses native web_search_preview instead of DDG.
+    can_reroute_native_search = (
+        has_web_search
+        and _web_search_model
+        and not _force_ddg_web_search
+        and _supports_native_openai_web_search(_web_search_model)
+        and not _supports_native_openai_web_search(mapped_model)
+    )
+
     if _should_use_native_anthropic_api("anthropic", mapped_model):
         # Claude-targeted Anthropic requests use DDG interception for web_search
         # instead of Copilot's native Anthropic web_search passthrough.
@@ -2027,19 +2039,12 @@ async def messages(request: Request):
             return await handle_native_anthropic_messages(
                 body, request=request, initiator=_get_initiator(request)
             )
-        # If the operator opted into native web search for Claude requests,
-        # reroute to /v1/responses against the configured model (e.g. gpt-5.4)
-        # so the upstream call uses web_search_preview instead of DDG.
-        if (
-            _claude_web_search_model
-            and not _force_ddg_web_search
-            and _supports_native_openai_web_search(_claude_web_search_model)
-        ):
+        if can_reroute_native_search:
             logger.info(
-                "Claude web_search: rerouting to %s via Responses for native web search",
-                _claude_web_search_model,
+                "web_search: rerouting %s to %s via Responses for native web search",
+                mapped_model, _web_search_model,
             )
-            body["model"] = _claude_web_search_model
+            body["model"] = _web_search_model
             return await handle_anthropic_via_responses(
                 body, request=request, initiator=_get_initiator(request)
             )
@@ -2049,6 +2054,15 @@ async def messages(request: Request):
 
     if _should_use_responses_api(mapped_model):
         body["model"] = mapped_model
+        return await handle_anthropic_via_responses(
+            body, request=request, initiator=_get_initiator(request)
+        )
+    if can_reroute_native_search:
+        logger.info(
+            "web_search: rerouting %s to %s via Responses for native web search",
+            mapped_model, _web_search_model,
+        )
+        body["model"] = _web_search_model
         return await handle_anthropic_via_responses(
             body, request=request, initiator=_get_initiator(request)
         )
