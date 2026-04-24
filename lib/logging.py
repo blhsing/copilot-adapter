@@ -121,10 +121,16 @@ def _build_access_formatter_class():
                 client_addr = args[0]
                 if isinstance(client_addr, str):
                     ip, port = _split_client_addr(client_addr)
+                    if port == "0":
+                        client_addr = ip
                     if ip:
                         host = get_cached_hostname(ip)
+                        new_addr: str | None = None
                         if host and host != ip:
                             new_addr = f"{host} ({client_addr})"
+                        elif port == "0":
+                            new_addr = client_addr
+                        if new_addr is not None:
                             rec = copy.copy(record)
                             rec.args = (new_addr,) + args[1:]
                             return super().formatMessage(rec)
