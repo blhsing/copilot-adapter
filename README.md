@@ -542,7 +542,7 @@ export GEMINI_API_BASE=http://127.0.0.1:18080/v1beta
 
 **Native web search via a helper model.** Set `--web-search-model MODEL` (e.g. `gpt-5.4`, or `COPILOT_ADAPTER_WEB_SEARCH_MODEL=gpt-5.4`) to reroute Anthropic `/v1/messages` requests that carry `web_search_20250305` through `/v1/responses` against `MODEL` whenever the mapped target model lacks native provider web search. The upstream call then uses OpenAI's native `web_search_preview` tool instead of DuckDuckGo. `--force-ddg-web-search` overrides this; if `MODEL` does not itself support native web search the option is ignored.
 
-For Anthropic clients, the adapter emits Anthropic-native `server_tool_use` and `web_search_tool_result` content blocks when it performs DDG interception, so clients such as Claude Code can render structured web-search results instead of only seeing plain-text continuation output.
+For Anthropic clients, the adapter emits Anthropic-native `server_tool_use` and `web_search_tool_result` content blocks on both the DDG-intercepted path and the `--web-search-model` native-search reroute. On the native path, URL citations are pulled from the upstream Responses API's `url_citation` annotations — queries that hit Copilot's web index (news, docs, general facts) return structured source URLs; queries that Copilot routes to its internal knowledge APIs (e.g. weather, finance) return no URLs and the tool result block is empty but still emitted.
 
 For non-Anthropic clients, the client still does not see the intermediate tool call.
 
