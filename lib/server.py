@@ -36,7 +36,7 @@ _web_search_max_iterations: int = 3
 # even when the target model is Anthropic (Claude). Useful for orgs that have
 # not enabled the Copilot native web-search AI control.
 _force_ddg_web_search: bool = False
-# When set (e.g. to "gpt-5.4"), Anthropic /v1/messages requests whose target
+# When set (e.g. to "gpt-5.5"), Anthropic /v1/messages requests whose target
 # model lacks native provider web search are rerouted through /v1/responses
 # against this model so they use the provider-native web_search_preview tool
 # instead of DuckDuckGo.
@@ -131,18 +131,23 @@ def _should_use_native_anthropic_api(source_provider: str, target_model: str) ->
     )
 
 
+def _is_gpt5_model(target_model: str) -> bool:
+    """Return True for any GPT-5 family model (gpt-5, gpt-5.x, gpt-5*-mini, etc.)."""
+    return target_model.startswith("gpt-5")
+
+
 def _should_use_responses_api(target_model: str) -> bool:
     """Return True when the target model requires the Responses API.
 
-    Some models (e.g. gpt-5.4) reject reasoning_effort + function tools
-    on ``/v1/chat/completions`` and require ``/v1/responses`` instead.
+    GPT-5 family models reject reasoning_effort + function tools on
+    ``/v1/chat/completions`` and require ``/v1/responses`` instead.
     """
-    return target_model in ("gpt-5.4",)
+    return _is_gpt5_model(target_model)
 
 
 def _supports_native_openai_web_search(target_model: str) -> bool:
     """Return True when the target model can use OpenAI Responses web search."""
-    return target_model in ("gpt-5.4",)
+    return _is_gpt5_model(target_model)
 
 
 def _body_has_web_search_tool(body: dict) -> bool:
@@ -261,11 +266,11 @@ def _normalize_request_params(
     _normalize_token_limit_params(openai_body, target_model)
     _normalize_reasoning_params(openai_body, source_provider, target_model, endpoint=endpoint)
     if "reasoning_effort" in openai_body:
-        # Some models (e.g. gpt-5.4) reject reasoning_effort + function
-        # tools in /v1/chat/completions (requires /v1/responses instead).
-        # Strip only for that known-incompatible chat/completions case.
+        # GPT-5 family models reject reasoning_effort + function tools in
+        # /v1/chat/completions (they require /v1/responses instead). Strip
+        # only for that known-incompatible chat/completions case.
         has_tools = bool(openai_body.get("tools"))
-        incompatible_chat_model = target_model == "gpt-5.4"
+        incompatible_chat_model = _is_gpt5_model(target_model)
         if endpoint == "chat_completions" and has_tools and incompatible_chat_model:
             stripped = openai_body.pop("reasoning_effort")
             logger.warning(
@@ -1397,7 +1402,7 @@ async def handle_anthropic_via_responses(
 ):
     """Route an Anthropic Messages request through the OpenAI Responses API.
 
-    This is used for target models like gpt-5.4 that require ``/v1/responses``
+    This is used for target models like gpt-5.5 that require ``/v1/responses``
     to support ``reasoning_effort`` with function tools.
     """
     resolved = initiator or anthropic_adapter.infer_initiator(body)

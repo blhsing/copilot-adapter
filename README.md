@@ -16,7 +16,7 @@ Authenticates via GitHub's device-flow OAuth (`ghu_` tokens), then proxies reque
 - [**Forward proxy mode**](#forward-proxy-mode) — Acts as an HTTP/HTTPS proxy that intercepts Copilot API traffic and rewrites billing headers, and transparently reroutes requests for OpenAI, Anthropic, and Gemini APIs through Copilot
 - [**One-command tool setup**](#tool-configuration) — Automatically configure popular agentic coding tools (Claude Code, Codex, Gemini CLI, OpenCode) to use this proxy, with easy revert to defaults
 - [**Configurable model mapping**](#model-mapping) — Built-in Claude model-ID normalization plus optional glob-pattern overrides
-- [**Cross-provider reasoning effort mapping**](#parameter-compatibility) — Preserves Anthropic thinking / `output_config.effort` when requests are mapped to OpenAI-style models, including Responses-only targets like `gpt-5.4`
+- [**Cross-provider reasoning effort mapping**](#parameter-compatibility) — Preserves Anthropic thinking / `output_config.effort` when requests are mapped to OpenAI-style models, including Responses-only targets like `gpt-5.5`
 - [**Server-side web search**](#server-side-web-search) — Executes `web_search` tool calls server-side, using provider-native web search where available and a DuckDuckGo fallback otherwise. Claude requests with `web_search` can optionally be rerouted through another provider's native web search. Other unsupported built-in tool types are stripped.
 - **Streaming support** — Full SSE streaming across all three formats, including real-time format translation
 - [**Flexible authentication**](#authentication) — Interactive device-flow OAuth with cached tokens and multi-account support
@@ -431,7 +431,7 @@ Patterns use glob syntax (`*` matches anything) and are checked in order — the
 For Anthropic `/v1/messages` requests, the adapter also uses the final mapped model to choose the upstream Copilot endpoint:
 
 - **Anthropic target** (for example `claude-sonnet-4.6`) — proxied natively to Anthropic Messages
-- **Responses-only OpenAI target** (for example `gpt-5.4`) — converted to OpenAI `/v1/responses`
+- **Responses-only OpenAI target** (for example `gpt-5.5`) — converted to OpenAI `/v1/responses`
 - **Other OpenAI-compatible targets** — converted to `/v1/chat/completions`
 
 This preserves Anthropic features like thinking / `output_config.effort` when a Claude client is mapped to a Responses-only OpenAI model.
@@ -540,11 +540,11 @@ export GEMINI_API_BASE=http://127.0.0.1:18080/v1beta
 
 **Claude-targeted Anthropic requests.** When an Anthropic `/v1/messages` request targets a Claude model and includes Anthropic's built-in `web_search_20250305` tool, the adapter converts that request to the chat-completions path and intercepts `web_search` server-side using [DuckDuckGo](https://github.com/deedy5/ddgs) (`ddgs` package). Claude models do not use Copilot's native Anthropic web-search passthrough by default.
 
-**Supported OpenAI Responses models.** When an Anthropic request is mapped to an OpenAI Responses-only model that supports native web search (currently `gpt-5.4`), the adapter preserves native web search by sending `web_search_preview` upstream instead of intercepting it locally.
+**Supported OpenAI Responses models.** When an Anthropic request is mapped to an OpenAI Responses-only model that supports native web search (currently `gpt-5.5`), the adapter preserves native web search by sending `web_search_preview` upstream instead of intercepting it locally.
 
 **Force-DDG override.** Set `--force-ddg-web-search` (or `COPILOT_ADAPTER_FORCE_DDG_WEB_SEARCH=1`) to disable provider-native web search and force DuckDuckGo interception wherever the adapter would otherwise preserve native search.
 
-**Native web search via a helper model.** Set `--web-search-model MODEL` (e.g. `gpt-5.4`, or `COPILOT_ADAPTER_WEB_SEARCH_MODEL=gpt-5.4`) to reroute Anthropic `/v1/messages` requests that carry `web_search_20250305` through `/v1/responses` against `MODEL` whenever the mapped target model lacks native provider web search. The upstream call then uses OpenAI's native `web_search_preview` tool instead of DuckDuckGo. `--force-ddg-web-search` overrides this; if `MODEL` does not itself support native web search the option is ignored.
+**Native web search via a helper model.** Set `--web-search-model MODEL` (e.g. `gpt-5.5`, or `COPILOT_ADAPTER_WEB_SEARCH_MODEL=gpt-5.5`) to reroute Anthropic `/v1/messages` requests that carry `web_search_20250305` through `/v1/responses` against `MODEL` whenever the mapped target model lacks native provider web search. The upstream call then uses OpenAI's native `web_search_preview` tool instead of DuckDuckGo. `--force-ddg-web-search` overrides this; if `MODEL` does not itself support native web search the option is ignored.
 
 For Anthropic clients, the adapter emits Anthropic-native `server_tool_use` and `web_search_tool_result` content blocks on both the DDG-intercepted path and the `--web-search-model` native-search reroute. On the native path, URL citations are pulled from the upstream Responses API's `url_citation` annotations — queries that hit Copilot's web index (news, docs, general facts) return structured source URLs; queries that Copilot routes to its internal knowledge APIs (e.g. weather, finance) return no URLs and the tool result block is empty but still emitted.
 
@@ -570,13 +570,13 @@ Anthropic clients (e.g. Claude Code) may send built-in tool types like `web_sear
 The proxy normalizes provider-specific request parameters after model mapping so cross-provider remaps keep working.
 
 - **Token limits** — Some targets require different token-limit fields and minimums. The proxy automatically uses the correct field based on the final mapped model and endpoint: `max_tokens` for Claude and Gemini targets, `max_completion_tokens` for OpenAI chat-completions targets, and `max_output_tokens` for OpenAI Responses targets. For Responses targets, very small Anthropic `max_tokens` values are raised to the upstream minimum when required.
-- **Reasoning / thinking effort** — When an Anthropic request includes thinking settings and is mapped to an OpenAI-style target, the proxy converts that intent to the nearest OpenAI reasoning effort. For example, Claude Code effort `max` mapped to `gpt-5.4` becomes reasoning effort `xhigh`.
-- **Endpoint selection for mapped Anthropic requests** — Anthropic `/v1/messages` requests are routed to the upstream endpoint required by the mapped target model, so Responses-only models such as `gpt-5.4` keep reasoning effort and tool support instead of falling back to `/v1/chat/completions`.
+- **Reasoning / thinking effort** — When an Anthropic request includes thinking settings and is mapped to an OpenAI-style target, the proxy converts that intent to the nearest OpenAI reasoning effort. For example, Claude Code effort `max` mapped to `gpt-5.5` becomes reasoning effort `xhigh`.
+- **Endpoint selection for mapped Anthropic requests** — Anthropic `/v1/messages` requests are routed to the upstream endpoint required by the mapped target model, so Responses-only models such as `gpt-5.5` keep reasoning effort and tool support instead of falling back to `/v1/chat/completions`.
 
 Examples:
 - Anthropic `output_config.effort: high` → OpenAI `reasoning_effort: high`
 - Anthropic `output_config.effort: max` → OpenAI `reasoning_effort: xhigh`
-- Anthropic client mapped to `gpt-5.4` → upstream `/v1/responses`
+- Anthropic client mapped to `gpt-5.5` → upstream `/v1/responses`
 
 **Effort clamping for native Anthropic passthrough** — Copilot restricts the effort levels accepted for Anthropic models more tightly than Anthropic's direct API. The proxy clamps unsupported values automatically:
 - `claude-opus-4.7`: Copilot only accepts `medium`; any other effort (`low`, `high`, `max`, `xhigh`) is clamped to `medium`.
@@ -588,7 +588,7 @@ This normalization is based on the final mapped model, so it works even when mod
 
 Run `python copilot_adapter.py serve` and visit `http://127.0.0.1:18080/v1/models` to see all models available through your Copilot subscription. Models include offerings from OpenAI, Anthropic, Google, and xAI.
 
-Note: some newer models (e.g. `gpt-5.4`) only support the `/v1/responses` endpoint, not `/v1/chat/completions`. The adapter handles this automatically for Anthropic `/v1/messages` requests after model mapping.
+Note: some newer models (e.g. `gpt-5.5`) only support the `/v1/responses` endpoint, not `/v1/chat/completions`. The adapter handles this automatically for Anthropic `/v1/messages` requests after model mapping.
 
 ## Tests
 

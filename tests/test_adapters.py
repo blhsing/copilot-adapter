@@ -270,12 +270,12 @@ class TestAnthropicAdapter:
 
     def test_normalize_anthropic_thinking_to_openai_reasoning(self):
         openai_body = {
-            "model": "gpt-5.4",
+            "model": "gpt-5.5",
             "messages": [{"role": "user", "content": "Hi."}],
             "max_tokens": 10,
             "_copilot_adapter_thinking": {"type": "enabled", "budget_tokens": 32000},
         }
-        normalized = _normalize_request_params(openai_body, "anthropic", "gpt-5.4")
+        normalized = _normalize_request_params(openai_body, "anthropic", "gpt-5.5")
         assert normalized["max_completion_tokens"] == 10
         assert "max_tokens" not in normalized
         assert normalized["reasoning_effort"] == "xhigh"
@@ -481,14 +481,14 @@ class TestAnthropicAdapter:
 
     def test_native_anthropic_api_selection(self):
         assert _should_use_native_anthropic_api("anthropic", "claude-opus-4.7") is True
-        assert _should_use_native_anthropic_api("anthropic", "gpt-5.4") is False
+        assert _should_use_native_anthropic_api("anthropic", "gpt-5.5") is False
         assert _should_use_native_anthropic_api("gemini", "claude-opus-4.7") is False
 
     def test_model_match_dot_vs_dash_versions(self):
         # Dot-separated requested vs dash-separated+date-suffix responded
         assert _is_model_match("claude-haiku-4.5", "claude-haiku-4-5-20251001") is True
         assert _is_model_match("claude-sonnet-4.6", "claude-sonnet-4-6-20260101") is True
-        assert _is_model_match("gpt-5.4", "gpt-5-4-2026") is True
+        assert _is_model_match("gpt-5.5", "gpt-5-5-2026") is True
         # Exact matches still work
         assert _is_model_match("claude-opus-4-7", "claude-opus-4-7") is True
         # Date-suffix only (no dot)
@@ -498,25 +498,25 @@ class TestAnthropicAdapter:
 
     def test_normalize_request_params_maps_anthropic_thinking_to_reasoning_effort(self):
         openai_body = {
-            "model": "gpt-5.4",
+            "model": "gpt-5.5",
             "messages": [{"role": "user", "content": "hi"}],
             "_copilot_adapter_thinking": {"budget_tokens": 12000},
         }
 
-        normalized = _normalize_request_params(openai_body, "anthropic", "gpt-5.4")
+        normalized = _normalize_request_params(openai_body, "anthropic", "gpt-5.5")
 
         assert normalized["reasoning_effort"] == "high"
         assert "_copilot_adapter_thinking" not in normalized
 
     def test_normalize_request_params_maps_anthropic_output_effort_to_reasoning_effort(self):
         openai_body = {
-            "model": "gpt-5.4",
+            "model": "gpt-5.5",
             "messages": [{"role": "user", "content": "hi"}],
             "_copilot_adapter_thinking": {"type": "adaptive"},
             "_copilot_adapter_output_effort": "high",
         }
 
-        normalized = _normalize_request_params(openai_body, "anthropic", "gpt-5.4")
+        normalized = _normalize_request_params(openai_body, "anthropic", "gpt-5.5")
 
         assert normalized["reasoning_effort"] == "high"
         assert "_copilot_adapter_thinking" not in normalized
@@ -524,7 +524,7 @@ class TestAnthropicAdapter:
 
     def test_normalize_request_params_strips_reasoning_effort_when_tools_present(self):
         openai_body = {
-            "model": "gpt-5.4",
+            "model": "gpt-5.5",
             "messages": [{"role": "user", "content": "hi"}],
             "_copilot_adapter_output_effort": "high",
             "_copilot_adapter_thinking": {"type": "adaptive"},
@@ -532,7 +532,7 @@ class TestAnthropicAdapter:
         }
 
         normalized = _normalize_request_params(
-            openai_body, "anthropic", "gpt-5.4", endpoint="chat_completions"
+            openai_body, "anthropic", "gpt-5.5", endpoint="chat_completions"
         )
 
         assert "reasoning_effort" not in normalized
@@ -540,7 +540,7 @@ class TestAnthropicAdapter:
 
     def test_normalize_request_params_keeps_reasoning_effort_with_tools_on_responses(self):
         openai_body = {
-            "model": "gpt-5.4",
+            "model": "gpt-5.5",
             "messages": [{"role": "user", "content": "hi"}],
             "_copilot_adapter_output_effort": "high",
             "_copilot_adapter_thinking": {"type": "adaptive"},
@@ -548,7 +548,7 @@ class TestAnthropicAdapter:
         }
 
         normalized = _normalize_request_params(
-            openai_body, "anthropic", "gpt-5.4", endpoint="responses"
+            openai_body, "anthropic", "gpt-5.5", endpoint="responses"
         )
 
         assert normalized["reasoning_effort"] == "high"
@@ -805,10 +805,10 @@ class TestResponsesToAnthropic:
             "status": "completed",
             "usage": {"input_tokens": 10, "output_tokens": 5},
         }
-        result = _responses_to_anthropic(resp, "gpt-5.4")
+        result = _responses_to_anthropic(resp, "gpt-5.5")
         assert result["type"] == "message"
         assert result["role"] == "assistant"
-        assert result["model"] == "gpt-5.4"
+        assert result["model"] == "gpt-5.5"
         assert len(result["content"]) == 1
         assert result["content"][0] == {"type": "text", "text": "Hello!"}
         assert result["stop_reason"] == "end_turn"
@@ -825,7 +825,7 @@ class TestResponsesToAnthropic:
             "status": "completed",
             "usage": {"input_tokens": 10, "output_tokens": 20},
         }
-        result = _responses_to_anthropic(resp, "gpt-5.4")
+        result = _responses_to_anthropic(resp, "gpt-5.5")
         assert result["stop_reason"] == "tool_use"
         assert len(result["content"]) == 1
         tc = result["content"][0]
@@ -852,7 +852,7 @@ class TestResponsesToAnthropic:
             "status": "completed",
             "usage": {"input_tokens": 5, "output_tokens": 15},
         }
-        result = _responses_to_anthropic(resp, "gpt-5.4")
+        result = _responses_to_anthropic(resp, "gpt-5.5")
         assert result["stop_reason"] == "tool_use"
         assert len(result["content"]) == 2
         assert result["content"][0]["type"] == "text"
@@ -864,12 +864,12 @@ class TestResponsesToAnthropic:
             "status": "incomplete",
             "usage": {"input_tokens": 5, "output_tokens": 100},
         }
-        result = _responses_to_anthropic(resp, "gpt-5.4")
+        result = _responses_to_anthropic(resp, "gpt-5.5")
         assert result["stop_reason"] == "max_tokens"
 
     def test_empty_output(self):
         resp = {"output": [], "status": "completed", "usage": {}}
-        result = _responses_to_anthropic(resp, "gpt-5.4")
+        result = _responses_to_anthropic(resp, "gpt-5.5")
         assert len(result["content"]) == 1
         assert result["content"][0] == {"type": "text", "text": ""}
 
@@ -910,7 +910,7 @@ class TestResponsesToAnthropic:
             "status": "completed",
             "usage": {"input_tokens": 3, "output_tokens": 4},
         }
-        result = _responses_to_anthropic(resp, "gpt-5.4")
+        result = _responses_to_anthropic(resp, "gpt-5.5")
         types = [b["type"] for b in result["content"]]
         assert types == ["server_tool_use", "web_search_tool_result", "text"]
         assert result["content"][0]["name"] == "web_search"
@@ -932,7 +932,7 @@ class TestResponsesToAnthropic:
             "status": "completed",
             "usage": {},
         }
-        result = _responses_to_anthropic(resp, "gpt-5.4")
+        result = _responses_to_anthropic(resp, "gpt-5.5")
         types = [b["type"] for b in result["content"]]
         assert "server_tool_use" in types
         assert "web_search_tool_result" in types
@@ -946,13 +946,13 @@ class TestAnthropicResponsesStreamConverter:
         return [f"event: {event_type}", f"data: {json.dumps(data)}"]
 
     def test_text_flow(self):
-        converter = _AnthropicResponsesStreamConverter("gpt-5.4")
+        converter = _AnthropicResponsesStreamConverter("gpt-5.5")
         output = ""
 
         # response.created
         for line in self._make_sse("response.created", {
             "type": "response.created",
-            "response": {"id": "resp_1", "model": "gpt-5.4", "output": []},
+            "response": {"id": "resp_1", "model": "gpt-5.5", "output": []},
         }):
             output += converter.feed(line)
 
@@ -1005,13 +1005,13 @@ class TestAnthropicResponsesStreamConverter:
         assert "end_turn" in output
 
     def test_function_call_flow(self):
-        converter = _AnthropicResponsesStreamConverter("gpt-5.4")
+        converter = _AnthropicResponsesStreamConverter("gpt-5.5")
         output = ""
 
         # created
         for line in self._make_sse("response.created", {
             "type": "response.created",
-            "response": {"id": "resp_1", "model": "gpt-5.4"},
+            "response": {"id": "resp_1", "model": "gpt-5.5"},
         }):
             output += converter.feed(line)
 
@@ -1074,17 +1074,17 @@ class TestAnthropicResponsesStreamConverter:
         assert "message_stop" in output
 
     def test_error_formatting(self):
-        converter = _AnthropicResponsesStreamConverter("gpt-5.4")
+        converter = _AnthropicResponsesStreamConverter("gpt-5.5")
         err = converter.format_error("error: 500 internal")
         assert err.startswith("event: error\n")
         assert "500" in err
 
     def test_web_search_flow(self):
-        converter = _AnthropicResponsesStreamConverter("gpt-5.4")
+        converter = _AnthropicResponsesStreamConverter("gpt-5.5")
         output = ""
         for line in self._make_sse("response.created", {
             "type": "response.created",
-            "response": {"id": "resp_1", "model": "gpt-5.4"},
+            "response": {"id": "resp_1", "model": "gpt-5.5"},
         }):
             output += converter.feed(line)
         for line in self._make_sse("response.output_item.added", {
@@ -1182,18 +1182,18 @@ class TestResponsesStreamHelpers:
         assert result == "Hello world"
 
     def test_extract_model_from_responses_sse(self):
-        line = 'data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.4"}}'
-        assert _extract_model_from_responses_sse(line) == "gpt-5.4"
+        line = 'data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.5"}}'
+        assert _extract_model_from_responses_sse(line) == "gpt-5.5"
         assert _extract_model_from_responses_sse('data: {"type":"response.output_text.delta"}') is None
         assert _extract_model_from_responses_sse('event: response.created') is None
 
     def test_should_use_responses_api(self):
-        assert _should_use_responses_api("gpt-5.4") is True
+        assert _should_use_responses_api("gpt-5.5") is True
         assert _should_use_responses_api("gpt-4o") is False
         assert _should_use_responses_api("claude-opus-4-7") is False
 
     def test_supports_native_openai_web_search(self):
-        assert _supports_native_openai_web_search("gpt-5.4") is True
+        assert _supports_native_openai_web_search("gpt-5.5") is True
         assert _supports_native_openai_web_search("gpt-4o") is False
         assert _supports_native_openai_web_search("claude-opus-4.7") is False
 
