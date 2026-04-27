@@ -4,8 +4,6 @@ An OpenAI / Anthropic / Gemini-compatible LLM API proxy server backed by GitHub 
 
 Authenticates via GitHub's device-flow OAuth (`ghu_` tokens), then proxies requests to GitHub Copilot's backend through a local server that speaks all three major LLM API formats.
 
-> **Note:** GitHub Personal Access Tokens (`ghp_`) are **not accepted** by the Copilot API — the `api.github.com/copilot_internal/v2/token` endpoint returns 404 for PATs regardless of the account's Copilot plan. Only OAuth tokens obtained via the device flow (`ghu_` prefix) work. See [PATs don't work for the Copilot API](#pats-dont-work-for-the-copilot-api).
-
 ## Key features
 
 - [**Multi-account pooling**](#multi-account) — Rotate between multiple GitHub Copilot accounts to pool premium request quotas, with automatic exhaustion detection and account switching
@@ -540,7 +538,7 @@ export GEMINI_API_BASE=http://127.0.0.1:18080/v1beta
 
 **Claude-targeted Anthropic requests.** When an Anthropic `/v1/messages` request targets a Claude model and includes Anthropic's built-in `web_search_20250305` tool, the adapter converts that request to the chat-completions path and intercepts `web_search` server-side using [DuckDuckGo](https://github.com/deedy5/ddgs) (`ddgs` package). Claude models do not use Copilot's native Anthropic web-search passthrough by default.
 
-**Supported OpenAI Responses models.** When an Anthropic request is mapped to an OpenAI Responses-only model that supports native web search (currently `gpt-5.5`), the adapter preserves native web search by sending `web_search_preview` upstream instead of intercepting it locally.
+**Supported OpenAI Responses models.** When an Anthropic request is mapped to a GPT-5 family model (`gpt-5`, `gpt-5.x`, `gpt-5*-mini`, `gpt-5*-codex`, etc.), all of which support native web search on `/v1/responses`, the adapter preserves native web search by sending `web_search_preview` upstream instead of intercepting it locally.
 
 **Force-DDG override.** Set `--force-ddg-web-search` (or `COPILOT_ADAPTER_FORCE_DDG_WEB_SEARCH=1`) to disable provider-native web search and force DuckDuckGo interception wherever the adapter would otherwise preserve native search.
 
