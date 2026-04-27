@@ -351,7 +351,7 @@ def config(tool: str, revert: bool, host: str, port: int,
               envvar="COPILOT_ADAPTER_WEB_SEARCH_MODEL",
               help="Reroute Anthropic /v1/messages requests that carry the "
                    "web_search tool through /v1/responses against MODEL (e.g. "
-                   "gpt-5.4) whenever the target model lacks native provider "
+                   "gpt-5.5) whenever the target model lacks native provider "
                    "web search, so the upstream call uses native "
                    "web_search_preview instead of DuckDuckGo. Ignored when "
                    "--force-ddg-web-search is set or MODEL does not support "
