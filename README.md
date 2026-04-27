@@ -2,7 +2,7 @@
 
 An OpenAI / Anthropic / Gemini-compatible LLM API proxy server backed by GitHub Copilot.
 
-Authenticates via GitHub's device-flow OAuth (`ghu_` tokens), then proxies requests to GitHub Copilot's backend through a local server that speaks all three major LLM API formats.
+Authenticates via GitHub's device-flow OAuth, then proxies requests to GitHub Copilot's backend through a local server that speaks all three major LLM API formats.
 
 ## Key features
 
