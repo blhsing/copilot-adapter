@@ -804,10 +804,77 @@ def _passthrough_sse_line(line: str) -> str:
     return ""
 
 
+def _strip_empty_text_blocks(messages):
+    """Drop ``{type:'text', text:''}`` content blocks from a messages array.
+
+    Anthropic's Messages API rejects requests with empty text content
+    blocks (``messages: text content blocks must be non-empty``). Clients
+    like Claude Code occasionally emit them after edits. Filter them out
+    before forwarding so a single malformed block doesn't 400 the whole
+    request. Whitespace-only text is preserved — only ``""`` and missing
+    text are dropped.
+    """
+    if not isinstance(messages, list):
+        return messages
+
+    def _is_empty_text(block):
+        if not isinstance(block, dict) or block.get("type") != "text":
+            return False
+        text = block.get("text")
+        return text is None or text == ""
+
+    def _clean_blocks(blocks):
+        if not isinstance(blocks, list):
+            return blocks, 0
+        kept = [b for b in blocks if not _is_empty_text(b)]
+        return kept, len(blocks) - len(kept)
+
+    cleaned = []
+    dropped_total = 0
+    for msg in messages:
+        if not isinstance(msg, dict):
+            cleaned.append(msg)
+            continue
+        content = msg.get("content")
+        new_msg = msg
+        if isinstance(content, list):
+            new_content, dropped = _clean_blocks(content)
+            if dropped:
+                dropped_total += dropped
+                new_msg = {**msg, "content": new_content}
+                # Recurse into tool_result blocks whose content is itself
+                # a list of text parts.
+            new_content = new_msg.get("content")
+            if isinstance(new_content, list):
+                rewritten = []
+                for block in new_content:
+                    if (
+                        isinstance(block, dict)
+                        and block.get("type") == "tool_result"
+                        and isinstance(block.get("content"), list)
+                    ):
+                        inner, inner_dropped = _clean_blocks(block["content"])
+                        if inner_dropped:
+                            dropped_total += inner_dropped
+                            block = {**block, "content": inner}
+                    rewritten.append(block)
+                if new_msg is msg:
+                    new_msg = {**msg, "content": rewritten}
+                else:
+                    new_msg["content"] = rewritten
+        cleaned.append(new_msg)
+
+    if dropped_total:
+        logger.debug("Stripped %d empty text content block(s) from messages", dropped_total)
+    return cleaned
+
+
 def _sanitize_native_anthropic_body(body: dict) -> dict:
     """Drop known unsupported fields before native Anthropic upstream calls."""
     sanitized = dict(body)
     sanitized.pop("context_management", None)
+    if "messages" in sanitized:
+        sanitized["messages"] = _strip_empty_text_blocks(sanitized["messages"])
     # Copilot limits supported effort levels per model.
     oc = sanitized.get("output_config")
     if isinstance(oc, dict) and "effort" in oc:
