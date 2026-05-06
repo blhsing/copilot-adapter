@@ -261,6 +261,36 @@ docker run -p 18080:18080 \
 
 > PATs (`ghp_`) passed via `COPILOT_ADAPTER_GITHUB_TOKEN` / `GITHUB_TOKEN` will be rejected — the Copilot API returns 404 for Personal Access Tokens. Use device-flow login instead (see above).
 
+#### Persisting container logs to a file
+
+`--log-file` writes the adapter's log stream to a path *inside the container*, so for a long-running daemon you usually want to capture the docker log stream from the host instead. A short-lived `nohup docker logs -f` tailer is fragile — it dies the moment the container is recreated and never comes back, leaving the log file silently stale. A small systemd unit makes the tailer self-healing across container restarts and host reboots:
+
+```ini
+# /etc/systemd/system/copilot-adapter-tailer.service
+[Unit]
+Description=Stream copilot-adapter container logs to /var/log/copilot_adapter.log
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/docker logs -f --tail=0 copilot-adapter
+StandardOutput=append:/var/log/copilot_adapter.log
+StandardError=append:/var/log/copilot_adapter.log
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now copilot-adapter-tailer.service
+```
+
+`Restart=always` reattaches `docker logs -f` whenever the container is restarted, recreated, or the host reboots. Requires systemd 240+ for the `append:` redirection syntax.
+
 ## Endpoints
 
 ### [OpenAI](https://platform.openai.com/docs/api-reference)
