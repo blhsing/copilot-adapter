@@ -56,7 +56,7 @@ class TestRoundRobin:
         mgr = _make_manager(2, "round-robin")
         for a in mgr._accounts:
             a.exhausted = True
-        with pytest.raises(RuntimeError, match="exhausted"):
+        with pytest.raises(RuntimeError, match="unavailable"):
             await mgr.get_client("user")
 
 
@@ -129,16 +129,18 @@ class TestSingleAccount:
     async def test_single_account_exhausted_raises(self):
         mgr = _make_manager(1, "round-robin")
         mgr._accounts[0].exhausted = True
-        with pytest.raises(RuntimeError, match="exhausted"):
+        with pytest.raises(RuntimeError, match="unavailable"):
             await mgr.get_client("user")
 
 
 class TestExhaustionDetection:
-    async def test_mark_exhausted(self):
+    async def test_mark_exhausted_sidelines_temporarily(self):
         mgr = _make_manager(3, "round-robin")
         target = mgr._accounts[1]
         await mgr.mark_exhausted(target.client)
-        assert target.exhausted is True
+        assert target.is_available() is False
+        assert target.unavailable_until is not None
+        assert target.exhausted is False  # not a permanent quota cap
 
     async def test_get_fallback_client(self):
         mgr = _make_manager(3, "round-robin")
@@ -146,13 +148,36 @@ class TestExhaustionDetection:
         fallback = await mgr.get_fallback_client(failed)
         assert fallback is not None
         assert fallback is not failed
-        assert mgr._accounts[0].exhausted is True
+        assert mgr._accounts[0].is_available() is False
+        assert mgr._accounts[0].unavailable_until is not None
 
     async def test_get_fallback_returns_none_when_all_exhausted(self):
         mgr = _make_manager(2, "round-robin")
         mgr._accounts[1].exhausted = True
         result = await mgr.get_fallback_client(mgr._accounts[0].client)
         assert result is None
+
+    async def test_sidelined_account_recovers_after_backoff(self):
+        # Use a 0-second back-off so the sidelined account is immediately
+        # eligible again on the next selection.
+        accounts = [(f"token_{i}", f"user_{i}") for i in range(2)]
+        with patch("lib.account_manager.CopilotTokenManager") as MockTM, \
+             patch("lib.account_manager.CopilotClient") as MockClient:
+            MockTM.side_effect = lambda t: MagicMock(github_token=t)
+            MockClient.side_effect = lambda tm: MagicMock(name=f"client_{tm.github_token}")
+            mgr = AccountManager(accounts, strategy="round-robin",
+                                 rate_limit_backoff_seconds=0)
+        await mgr.mark_exhausted(mgr._accounts[0].client)
+        # Both accounts should be available again immediately
+        assert mgr._accounts[0].is_available() is True
+
+    async def test_skips_sidelined_during_backoff(self):
+        mgr = _make_manager(2, "round-robin")
+        await mgr.mark_exhausted(mgr._accounts[0].client)
+        # Within backoff window, only account 1 should be picked
+        for _ in range(4):
+            client = await mgr.get_client("user")
+            assert client is mgr._accounts[1].client
 
 
 class TestQuotaLimit:

@@ -285,6 +285,11 @@ def config(tool: str, revert: bool, host: str, port: int,
 @click.option("--quota-limit", default=None, type=int,
               envvar="COPILOT_ADAPTER_QUOTA_LIMIT", metavar="N",
               help="Default monthly premium request limit per account (default: 300).")
+@click.option("--rate-limit-backoff-minutes", default=None, type=int,
+              envvar="COPILOT_ADAPTER_RATE_LIMIT_BACKOFF_MINUTES", metavar="N",
+              help="Minutes to sideline an account after a transient upstream failure "
+                   "(e.g. 429 rate limit) before it becomes eligible again "
+                   "(default: 60).")
 @click.option("--plan", default=None,
               type=click.Choice(list(_VALID_PLANS)),
               envvar="COPILOT_ADAPTER_PLAN",
@@ -372,7 +377,8 @@ def config(tool: str, revert: bool, host: str, port: int,
 def serve(config_path: str | None, host: str | None, port: int | None,
           github_token: tuple[str, ...], cors_origin: tuple[str, ...],
           workers: int | None, strategy: str | None,
-          quota_limit: int | None, plan: str | None,
+          quota_limit: int | None, rate_limit_backoff_minutes: int | None,
+          plan: str | None,
           log_level: str | None, log_file: str | None, force_free: bool,
           free_within_minutes: float | None,
           stub_bill: bool, stub_model: str | None,
@@ -401,6 +407,10 @@ def serve(config_path: str | None, host: str | None, port: int | None,
     workers = workers if workers is not None else cfg.get("workers", 1)
     strategy = strategy or cfg.get("strategy", "max-usage")
     quota_limit = quota_limit if quota_limit is not None else cfg.get("quota_limit")
+    rate_limit_backoff_minutes = (
+        rate_limit_backoff_minutes if rate_limit_backoff_minutes is not None
+        else cfg.get("rate_limit_backoff_minutes", 60)
+    )
     plan = plan or cfg.get("plan", "pro")
     log_level = log_level or cfg.get("log_level", "info")
     log_file = log_file or cfg.get("log_file")
@@ -524,6 +534,7 @@ def serve(config_path: str | None, host: str | None, port: int | None,
 
     acct_mgr = AccountManager(
         accounts, strategy=strategy, quota_limit=quota_limit, plan=plan,
+        rate_limit_backoff_seconds=rate_limit_backoff_minutes * 60,
     )
 
     # Verify all accounts can get a Copilot token
