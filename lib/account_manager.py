@@ -91,8 +91,16 @@ class AccountInfo:
     plan: str = "pro"
     premium_used: float = 0
     premium_limit: int | None = None  # None = unknown
-    exhausted: bool = False
+    exhausted: bool = False  # permanent quota exhaustion (clears only on restart)
+    unavailable_until: float | None = None  # transient back-off (e.g. rate limit)
     last_request_time: float | None = None
+
+    def is_available(self) -> bool:
+        if self.exhausted:
+            return False
+        if self.unavailable_until is not None and time.time() < self.unavailable_until:
+            return False
+        return True
 
 
 class AccountManager:
@@ -110,6 +118,7 @@ class AccountManager:
         strategy: str = "max-usage",
         quota_limit: int | None = None,
         plan: str = "pro",
+        rate_limit_backoff_seconds: int = 3600,
     ):
         if strategy not in self.STRATEGIES:
             raise ValueError(f"Unknown strategy: {strategy!r}")
@@ -118,6 +127,7 @@ class AccountManager:
 
         self._strategy = strategy
         self._plan = plan
+        self._rate_limit_backoff_seconds = rate_limit_backoff_seconds
         self._lock = asyncio.Lock()
         self._rr_index = -1
         self._last_user_account: AccountInfo | None = None
@@ -234,51 +244,63 @@ class AccountManager:
         return None
 
     async def mark_exhausted(self, client: CopilotClient) -> None:
-        """Mark the account associated with *client* as exhausted."""
+        """Temporarily sideline the account associated with *client* after a
+        transient failure (e.g. rate limit). The account becomes eligible
+        again automatically after ``rate_limit_backoff_seconds``.
+        """
         async with self._lock:
             for acct in self._accounts:
                 if acct.client is client:
-                    acct.exhausted = True
-                    logger.warning("Account %s marked as exhausted", acct.username)
+                    self._mark_unavailable(acct)
                     break
 
     async def get_fallback_client(self, failed_client: CopilotClient) -> CopilotClient | None:
-        """Return the next non-exhausted client after marking *failed_client* exhausted.
+        """Return the next available client after temporarily sidelining
+        *failed_client*. The sidelined account auto-recovers after
+        ``rate_limit_backoff_seconds``.
 
-        If no other accounts are available, returns ``None`` *without* marking
-        the current account exhausted — so single-account setups keep working.
+        If no other accounts are available, returns ``None`` *without*
+        sidelining the current account — so single-account setups keep working.
         """
         async with self._lock:
             available = [a for a in self._accounts
-                         if not a.exhausted and a.client is not failed_client]
+                         if a.is_available() and a.client is not failed_client]
             if not available:
                 return None
-            # Only mark the failed account now that we know there's a fallback
+            # Only sideline the failed account now that we know there's a fallback
             for acct in self._accounts:
                 if acct.client is failed_client:
-                    acct.exhausted = True
-                    logger.warning("Account %s marked as exhausted", acct.username)
+                    self._mark_unavailable(acct)
                     break
             return available[0].client
 
+    def _mark_unavailable(self, acct: AccountInfo) -> None:
+        """Sideline *acct* until ``rate_limit_backoff_seconds`` elapses.
+        Must be called with the lock held."""
+        acct.unavailable_until = time.time() + self._rate_limit_backoff_seconds
+        logger.warning(
+            "Account %s sidelined for %d minutes (rate-limit back-off)",
+            acct.username, self._rate_limit_backoff_seconds // 60,
+        )
+
     async def _select_by_strategy(self) -> AccountInfo:
         """Apply the configured rotation strategy. Must be called with lock held."""
-        available = [a for a in self._accounts if not a.exhausted]
+        available = [a for a in self._accounts if a.is_available()]
         if not available:
             raise RuntimeError(
-                "All accounts have exhausted their premium request quota."
+                "All accounts are unavailable (quota exhausted or rate-limited)."
             )
 
         if self._strategy == "round-robin":
             self._rr_index = (self._rr_index + 1) % len(self._accounts)
-            # Skip exhausted, wrapping around
+            # Skip unavailable, wrapping around
             for _ in range(len(self._accounts)):
                 candidate = self._accounts[self._rr_index]
-                if not candidate.exhausted:
+                if candidate.is_available():
                     return candidate
                 self._rr_index = (self._rr_index + 1) % len(self._accounts)
             raise RuntimeError(
-                "All accounts have exhausted their premium request quota."
+                "All accounts are unavailable (quota exhausted or rate-limited)."
             )
 
         if self._strategy == "max-usage":

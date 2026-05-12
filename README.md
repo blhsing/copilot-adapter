@@ -122,6 +122,8 @@ Agent-initiated requests (tool-use follow-ups) always stay on the same account a
 
 **Quota exhaustion detection**: When a Copilot account's premium request quota is exhausted, GitHub silently downgrades the response to a free fallback model (e.g. GPT-4.1) instead of returning an error. The server detects this by comparing the model in the response against the model that was requested — if they don't match, it marks the account as exhausted and automatically retries the request with the next available account. This works for both streaming and non-streaming requests.
 
+**Rate-limit back-off**: When an account returns 429 (rate limited), it is sidelined temporarily and rotation skips it. The default back-off is 60 minutes (configurable via `--rate-limit-backoff-minutes`), after which the account becomes eligible again automatically — distinct from the permanent quota-exhaustion mark above, which only clears on container restart or a manual usage reset.
+
 For proactive switching *before* hitting the limit, set `--quota-limit N` or let it default from the plan. Usage is tracked in-memory with plan-aware model cost multipliers (e.g. Claude Opus 4.7 costs 3x, GPT-4o costs 0x on paid plans). You can specify each account's current usage via the `TOKEN:PLAN:QUOTA:USAGE` format, `--usage` flag, or config file to start tracking from where you left off. These defaults can be overridden per account — see [Per-account plan and quota](#per-account-plan-and-quota).
 
 **Supported plans** (`--plan`):
@@ -196,6 +198,7 @@ All CLI options can be set via environment variables:
 | `--workers` | `COPILOT_ADAPTER_WORKERS` | `1` |
 | `--strategy` | `COPILOT_ADAPTER_STRATEGY` | `max-usage` |
 | `--quota-limit` | `COPILOT_ADAPTER_QUOTA_LIMIT` | per plan |
+| `--rate-limit-backoff-minutes` | `COPILOT_ADAPTER_RATE_LIMIT_BACKOFF_MINUTES` | `60` |
 | `--plan` | `COPILOT_ADAPTER_PLAN` | `pro` |
 | `--log-level` | `COPILOT_ADAPTER_LOG_LEVEL` | `info` |
 | `--log-file` | `COPILOT_ADAPTER_LOG_FILE` | *(none)* |
