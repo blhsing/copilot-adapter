@@ -877,16 +877,27 @@ def _sanitize_native_anthropic_body(body: dict) -> dict:
         sanitized["messages"] = _strip_empty_text_blocks(sanitized["messages"])
     # Copilot limits supported effort levels per model.
     oc = sanitized.get("output_config")
-    if isinstance(oc, dict) and "effort" in oc:
-        effort = oc["effort"]
-        model = sanitized.get("model", "")
-        if "opus-4.7" in model or "opus-4-7" in model:
-            # Copilot only supports medium for opus 4.7
-            if effort != "medium":
-                sanitized["output_config"] = {**oc, "effort": "medium"}
-        elif effort in ("max", "xhigh"):
-            # Copilot doesn't support max/xhigh; clamp to high
-            sanitized["output_config"] = {**oc, "effort": "high"}
+    if isinstance(oc, dict):
+        # Vertex AI (which Copilot uses for Claude on the backend) blocks
+        # structured_outputs via an org policy on at least some projects.
+        # Strip output_config.format unconditionally — clients that asked for
+        # a json_schema get plain text back, which Claude usually still emits
+        # as valid JSON because the surrounding prompt requests it.
+        if "format" in oc:
+            oc = {k: v for k, v in oc.items() if k != "format"}
+            sanitized["output_config"] = oc
+        if "effort" in oc:
+            effort = oc["effort"]
+            model = sanitized.get("model", "")
+            if "opus-4.7" in model or "opus-4-7" in model:
+                # Copilot only supports medium for opus 4.7
+                if effort != "medium":
+                    sanitized["output_config"] = {**oc, "effort": "medium"}
+            elif effort in ("max", "xhigh"):
+                # Copilot doesn't support max/xhigh; clamp to high
+                sanitized["output_config"] = {**oc, "effort": "high"}
+        if not sanitized["output_config"]:
+            sanitized.pop("output_config", None)
     return sanitized
 
 
