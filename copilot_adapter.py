@@ -366,6 +366,14 @@ def config(tool: str, revert: bool, host: str, port: int,
               help="DNS server (IP or hostname) to use for reverse lookups "
                    "when logging the originating client as a hostname. "
                    "Defaults to the system resolver.")
+@click.option("--reverse-dns-sync-wait-ms", default=None, type=int,
+              envvar="COPILOT_ADAPTER_REVERSE_DNS_SYNC_WAIT_MS",
+              metavar="MS",
+              help="On a fresh reverse-DNS cache miss, block the access-log "
+                   "emission for up to MS milliseconds waiting for the lookup "
+                   "to complete, so the very first log line for an IP can "
+                   "carry its hostname. Set to 0 to keep lookups fully async "
+                   "(default: 150).")
 @click.option("--forwarded-allow-ips", default=None, metavar="IPS",
               envvar="COPILOT_ADAPTER_FORWARDED_ALLOW_IPS",
               help="Comma-separated IPs (or '*') whose X-Forwarded-For / "
@@ -389,6 +397,7 @@ def serve(config_path: str | None, host: str | None, port: int | None,
           force_ddg_web_search: bool,
           web_search_model: str | None,
           reverse_dns_server: str | None,
+          reverse_dns_sync_wait_ms: int | None,
           forwarded_allow_ips: str | None):
     """Start the OpenAI-compatible API server."""
     import uvicorn
@@ -450,6 +459,10 @@ def serve(config_path: str | None, host: str | None, port: int | None,
     force_ddg_web_search = force_ddg_web_search or cfg.get("force_ddg_web_search", False)
     web_search_model = web_search_model or cfg.get("web_search_model")
     reverse_dns_server = reverse_dns_server or cfg.get("reverse_dns_server")
+    reverse_dns_sync_wait_ms = (
+        reverse_dns_sync_wait_ms if reverse_dns_sync_wait_ms is not None
+        else cfg.get("reverse_dns_sync_wait_ms", 150)
+    )
     forwarded_allow_ips = forwarded_allow_ips or cfg.get("forwarded_allow_ips")
 
     # --- API tokens: CLI/env > config file > stored tokens ---
@@ -561,7 +574,7 @@ def serve(config_path: str | None, host: str | None, port: int | None,
     print(f"\nStarting server on http://{host}:{port}\n")
 
     from uvicorn.config import LOGGING_CONFIG
-    logging_config = build_runtime_logging_config(LOGGING_CONFIG, log_level, log_file, reverse_dns_server)
+    logging_config = build_runtime_logging_config(LOGGING_CONFIG, log_level, log_file, reverse_dns_server, reverse_dns_sync_wait_ms)
 
     if proxy_mode and workers > 1:
         print("Warning: --proxy mode is not compatible with multiple workers, using 1 worker")
@@ -604,6 +617,8 @@ def serve(config_path: str | None, host: str | None, port: int | None,
             os.environ["_COPILOT_ADAPTER_WEB_SEARCH_MODEL"] = web_search_model
         if reverse_dns_server:
             os.environ["_COPILOT_ADAPTER_REVERSE_DNS_SERVER"] = reverse_dns_server
+        if reverse_dns_sync_wait_ms is not None:
+            os.environ["_COPILOT_ADAPTER_REVERSE_DNS_SYNC_WAIT_MS"] = str(reverse_dns_sync_wait_ms)
 
         uvicorn.run(
             "lib.server:app", host=host, port=port,
