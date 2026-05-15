@@ -216,13 +216,14 @@ All CLI options can be set via environment variables:
 | `--force-ddg-web-search` | `COPILOT_ADAPTER_FORCE_DDG_WEB_SEARCH` | *(off)* |
 | `--web-search-model` | `COPILOT_ADAPTER_WEB_SEARCH_MODEL` | *(none)* |
 | `--reverse-dns-server` | `COPILOT_ADAPTER_REVERSE_DNS_SERVER` | *(system resolver)* |
+| `--reverse-dns-sync-wait-ms` | `COPILOT_ADAPTER_REVERSE_DNS_SYNC_WAIT_MS` | `150` |
 | `--forwarded-allow-ips` | `COPILOT_ADAPTER_FORWARDED_ALLOW_IPS` | `127.0.0.1` |
 
 Set `NO_COLOR=1` to disable colored log output. Colors are auto-detected on Windows (requires Windows Terminal or VT-enabled console).
 
 Use `--log-file /path/to/copilot-adapter.log` (or `log_file` in the config file) to append the same logs to a file while keeping console output enabled.
 
-Access log lines show the originating client as `hostname (ip:port)` when a reverse DNS lookup succeeds, and fall back to the raw `ip:port` otherwise. Lookups run asynchronously on a background thread and are cached per IP, so the first request from a new address is logged with just the IP while the resolution is in flight. Use `--reverse-dns-server` (or `COPILOT_ADAPTER_REVERSE_DNS_SERVER`) to point the lookups at a specific DNS server — useful when the system resolver can't see an internal zone that maps the originating hosts. When requests arrive through an HTTP proxy such as Squid, the TCP peer is the proxy; set `--forwarded-allow-ips` (or `COPILOT_ADAPTER_FORWARDED_ALLOW_IPS`) to the proxy's IP (or `*`) so the `X-Forwarded-For` header is honored and the log shows the real client.
+Access log lines show the originating client as `hostname (ip:port)` when a reverse DNS lookup succeeds, and fall back to the raw `ip:port` otherwise. Lookups run asynchronously on a background thread and are cached per IP. On a fresh cache miss, the access-log emission blocks briefly for the lookup to land — up to `--reverse-dns-sync-wait-ms` milliseconds (default 150) — so the very first log line for a new client typically already carries its hostname; set the value to `0` to keep lookups fully async (and accept that the first line for each new IP shows the bare IP). Use `--reverse-dns-server` (or `COPILOT_ADAPTER_REVERSE_DNS_SERVER`) to point the lookups at a specific DNS server — useful when the system resolver can't see an internal zone that maps the originating hosts. When requests arrive through an HTTP proxy such as Squid, the TCP peer is the proxy; set `--forwarded-allow-ips` (or `COPILOT_ADAPTER_FORWARDED_ALLOW_IPS`) to the proxy's IP (or `*`) so the `X-Forwarded-For` header is honored and the log shows the real client.
 
 `GITHUB_TOKEN` is also accepted as a fallback for the GitHub token. Multiple tokens can be comma-separated in `COPILOT_ADAPTER_GITHUB_TOKEN` or `GITHUB_TOKEN`.
 

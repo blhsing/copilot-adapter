@@ -28,6 +28,7 @@ class LifespanFilter(logging.Filter):
 _MISSING = object()
 _hostname_cache: dict[str, str | None] = {}
 _hostname_lock = threading.Lock()
+_lookup_events: dict[str, threading.Event] = {}
 
 
 def _reverse_dns_server() -> str | None:
@@ -36,6 +37,18 @@ def _reverse_dns_server() -> str | None:
         or os.environ.get("COPILOT_ADAPTER_REVERSE_DNS_SERVER")
         or None
     )
+
+
+def _reverse_dns_sync_wait_ms() -> int:
+    raw = (
+        os.environ.get("_COPILOT_ADAPTER_REVERSE_DNS_SYNC_WAIT_MS")
+        or os.environ.get("COPILOT_ADAPTER_REVERSE_DNS_SYNC_WAIT_MS")
+        or "0"
+    )
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 0
 
 
 def _lookup_hostname_sync(ip: str) -> str | None:
@@ -67,29 +80,52 @@ def _lookup_hostname_sync(ip: str) -> str | None:
         return None
 
 
-def _schedule_lookup(ip: str) -> None:
+def _schedule_lookup(ip: str) -> threading.Event:
+    """Spawn a background lookup for *ip*. Caller holds ``_hostname_lock``
+    and must register the returned event before releasing it."""
+    event = threading.Event()
+    _lookup_events[ip] = event
+
     def worker():
         name = _lookup_hostname_sync(ip)
         with _hostname_lock:
             _hostname_cache[ip] = name
+            _lookup_events.pop(ip, None)
+        event.set()
+
     threading.Thread(target=worker, daemon=True).start()
+    return event
 
 
-def get_cached_hostname(ip: str) -> str | None:
-    """Return a cached hostname for ``ip`` or trigger a background lookup."""
+def get_cached_hostname(ip: str, sync_wait_ms: int | None = None) -> str | None:
+    """Return a cached hostname for ``ip``.
+
+    On a fresh cache miss, schedules a background DNS lookup. If
+    ``sync_wait_ms`` (or the ``COPILOT_ADAPTER_REVERSE_DNS_SYNC_WAIT_MS``
+    env override) is positive, blocks up to that many milliseconds for the
+    lookup to complete so the very first log line for an IP can carry the
+    hostname. Returns ``None`` if the lookup hasn't completed by then.
+    """
     if not ip:
         return None
+    if sync_wait_ms is None:
+        sync_wait_ms = _reverse_dns_sync_wait_ms()
+    event_to_wait: threading.Event | None = None
     with _hostname_lock:
         cached = _hostname_cache.get(ip, _MISSING)
         if cached is _MISSING:
             _hostname_cache[ip] = None  # placeholder so we only fire once
-            scheduled = True
+            event_to_wait = _schedule_lookup(ip)
+        elif cached is None:
+            # A prior caller scheduled a lookup that may still be in flight.
+            event_to_wait = _lookup_events.get(ip)
         else:
-            scheduled = False
-    if scheduled:
-        _schedule_lookup(ip)
-        return None
-    return cached
+            return cached
+    if event_to_wait is not None and sync_wait_ms > 0:
+        if event_to_wait.wait(sync_wait_ms / 1000.0):
+            with _hostname_lock:
+                return _hostname_cache.get(ip)
+    return None
 
 
 def _split_client_addr(client_addr: str) -> tuple[str, str | None]:
@@ -156,10 +192,13 @@ def build_logging_config(
     log_level: str,
     log_file: str | None = None,
     reverse_dns_server: str | None = None,
+    reverse_dns_sync_wait_ms: int | None = None,
 ) -> dict:
     """Return a Uvicorn logging config with optional additive file logging."""
     if reverse_dns_server:
         os.environ["_COPILOT_ADAPTER_REVERSE_DNS_SERVER"] = reverse_dns_server
+    if reverse_dns_sync_wait_ms is not None:
+        os.environ["_COPILOT_ADAPTER_REVERSE_DNS_SYNC_WAIT_MS"] = str(reverse_dns_sync_wait_ms)
 
     _ensure_hostname_formatter()
 
@@ -242,13 +281,17 @@ def build_runtime_logging_config(
     log_level: str,
     log_file: str | None = None,
     reverse_dns_server: str | None = None,
+    reverse_dns_sync_wait_ms: int | None = None,
 ) -> dict:
     """Build logging config, honoring worker env overrides when present."""
+    if reverse_dns_sync_wait_ms is None:
+        reverse_dns_sync_wait_ms = _reverse_dns_sync_wait_ms() or None
     return build_logging_config(
         base_config,
         log_level,
         resolve_worker_log_file(log_file),
         reverse_dns_server or _reverse_dns_server(),
+        reverse_dns_sync_wait_ms,
     )
 
 
