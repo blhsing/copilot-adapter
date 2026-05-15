@@ -572,6 +572,38 @@ class TestAnthropicAdapter:
         assert sanitized["output_config"] == {"effort": "high"}
         assert "context_management" in body
 
+    def test_sanitize_native_anthropic_body_strips_output_config_format(self):
+        # Copilot's Vertex backend rejects structured_outputs via an org policy
+        # constraint, so output_config.format must be stripped before forwarding.
+        body = {
+            "model": "claude-opus-4.7",
+            "messages": [{"role": "user", "content": "hi"}],
+            "output_config": {
+                "effort": "medium",
+                "format": {"type": "json_schema", "schema": {"type": "object"}},
+            },
+        }
+
+        sanitized = _sanitize_native_anthropic_body(body)
+
+        assert sanitized["output_config"] == {"effort": "medium"}
+        # original body untouched
+        assert "format" in body["output_config"]
+
+    def test_sanitize_native_anthropic_body_drops_empty_output_config(self):
+        # If output_config only had format, dropping it should leave the key out.
+        body = {
+            "model": "claude-opus-4.7",
+            "messages": [{"role": "user", "content": "hi"}],
+            "output_config": {
+                "format": {"type": "json_schema", "schema": {"type": "object"}},
+            },
+        }
+
+        sanitized = _sanitize_native_anthropic_body(body)
+
+        assert "output_config" not in sanitized
+
     def test_body_has_web_search_tool(self):
         assert _body_has_web_search_tool({
             "tools": [{"type": "web_search_20250305", "name": "web_search"}],
