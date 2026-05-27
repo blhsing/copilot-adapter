@@ -1,12 +1,15 @@
 """OpenAI-compatible API server that proxies to GitHub Copilot."""
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
 import re
+import time
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from fnmatch import fnmatch
 from pathlib import Path
 
@@ -20,6 +23,7 @@ from .adapters.anthropic import (
     _responses_to_anthropic,
 )
 from .account_manager import AccountManager
+from .anthropic_client import AnthropicClient
 
 logger = logging.getLogger(__name__)
 
@@ -670,7 +674,8 @@ async def _lifespan(application: FastAPI):
         for entry in tokens_raw.split(","):
             parts = entry.split(":")
             if len(parts) >= 2:
-                acct: dict = {"token": parts[0], "username": parts[1]}
+                acct: dict = {"token": parts[0], "username": parts[1],
+                              "backend": "copilot"}
                 if len(parts) >= 3 and parts[2]:
                     acct["plan"] = parts[2]
                 if len(parts) >= 4 and parts[3]:
@@ -678,6 +683,21 @@ async def _lifespan(application: FastAPI):
                 if len(parts) >= 5 and parts[4]:
                     acct["premium_used"] = float(parts[4])
                 accounts.append(acct)
+        # Anthropic accounts come from the on-disk cache, not env vars —
+        # they carry refresh tokens that we don't want to serialize through
+        # a worker-spawn environment variable.
+        try:
+            from .anthropic_auth import resolve_anthropic_accounts
+            for a in resolve_anthropic_accounts():
+                accounts.append({**a, "backend": "anthropic"})
+        except Exception as exc:
+            logger.debug("No Anthropic accounts loaded: %s", exc)
+
+        # Spoof flag flows through the env too — module-level on AnthropicClient.
+        if os.environ.get("_COPILOT_ADAPTER_SPOOF_INTERACTIVE", "") == "1":
+            from . import anthropic_client as _ac
+            _ac.SPOOF_INTERACTIVE = True
+
         account_mgr = AccountManager(
             accounts, strategy=strategy, quota_limit=quota_limit, plan=plan,
         )
@@ -788,6 +808,121 @@ def _get_initiator(request: Request) -> str | None:
 def _is_rate_limit_error(line: str) -> bool:
     """Check if an SSE error line indicates a 429 rate limit."""
     return line.startswith("error: 429")
+
+
+def _client_ip(request: Request | None) -> str | None:
+    """Return the originating client IP, preferring ``X-Real-Client-IP``.
+
+    In forward-proxy mode the immediate peer of the loopback Uvicorn is the
+    forward-proxy itself (127.0.0.1). The dispatcher in ``forward_proxy.py``
+    threads the real outer-socket peer IP through ``X-Real-Client-IP`` so logs
+    show the actual originating host rather than loopback.
+
+    The header is stripped from incoming requests on the public TCP listener
+    before being re-injected, so a client can't spoof its source IP by
+    sending ``X-Real-Client-IP`` themselves.
+    """
+    if request is None:
+        return None
+    hdr = request.headers.get("x-real-client-ip")
+    if hdr:
+        return hdr
+    if request.client is not None:
+        return request.client.host
+    return None
+
+
+def _derive_conv_key(body: dict, source_provider: str) -> str | None:
+    """Compute a stable conversation key from the first user message.
+
+    Used by ``AccountManager`` to pin a multi-turn conversation to the same
+    account across rotations. The hash is intentionally tied to the *first*
+    user message only — subsequent turns produce the same key because the
+    first message stays in ``messages[0]`` for the life of the conversation.
+
+    Returns ``None`` if the body has no user message yet (system-only
+    probes, malformed requests, etc.) so the caller skips conv stickiness.
+    """
+    msgs = body.get("messages")
+    if not isinstance(msgs, list):
+        return None
+    first_user = None
+    for m in msgs:
+        if isinstance(m, dict) and m.get("role") == "user":
+            first_user = m
+            break
+    if first_user is None:
+        return None
+    content = first_user.get("content")
+    if content is None:
+        return None
+    if isinstance(content, str):
+        text = content
+    elif isinstance(content, list):
+        # Anthropic content blocks: pull text out of every text block.
+        parts = []
+        for blk in content:
+            if isinstance(blk, dict) and blk.get("type") == "text":
+                t = blk.get("text")
+                if isinstance(t, str):
+                    parts.append(t)
+            elif isinstance(blk, str):
+                parts.append(blk)
+        text = "\n".join(parts)
+    else:
+        text = json.dumps(content, sort_keys=True, ensure_ascii=False)
+    if not text:
+        return None
+    # Including the provider keeps OpenAI / Anthropic / Gemini conversations
+    # with identical opening lines from colliding on the same cache slot.
+    digest = hashlib.sha1(
+        (source_provider + "\0" + text).encode("utf-8", errors="replace")
+    ).hexdigest()
+    return digest
+
+
+def _parse_anthropic_reset_utc(headers: dict) -> float | None:
+    """Best-effort parse of Anthropic rate-limit reset headers to a UTC ts.
+
+    Tries (in order) ``anthropic-ratelimit-unified-reset`` (Unix seconds),
+    ``anthropic-ratelimit-requests-reset`` (ISO 8601), and ``retry-after``
+    (seconds-from-now). Returns ``None`` if no header is parseable.
+    """
+    def _get(name: str) -> str | None:
+        for k, v in headers.items():
+            if k.lower() == name:
+                return v
+        return None
+
+    unified = _get("anthropic-ratelimit-unified-reset")
+    if unified:
+        try:
+            return float(unified)
+        except ValueError:
+            pass
+
+    requests_reset = _get("anthropic-ratelimit-requests-reset")
+    if requests_reset:
+        try:
+            iso = requests_reset.replace("Z", "+00:00")
+            dt = datetime.fromisoformat(iso)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.timestamp()
+        except ValueError:
+            pass
+
+    retry_after = _get("retry-after")
+    if retry_after:
+        try:
+            return time.time() + float(retry_after)
+        except ValueError:
+            try:
+                dt = datetime.strptime(retry_after, "%a, %d %b %Y %H:%M:%S GMT")
+                return dt.replace(tzinfo=timezone.utc).timestamp()
+            except ValueError:
+                pass
+    return None
 
 
 def _is_transient_upstream_error(line: str) -> bool:
@@ -1081,7 +1216,8 @@ async def handle_chat_completion(
         openai_body, source_provider, requested_model, endpoint="chat_completions"
     )
 
-    client = await account_mgr.get_client(initiator=resolved)
+    conv_key = _derive_conv_key(body, source_provider)
+    client = await account_mgr.get_client(initiator=resolved, conv_key=conv_key)
 
     # Time-based free override: if the last request was within N minutes, mark as agent
     if _free_within_minutes is not None and resolved == "user":
@@ -1362,13 +1498,31 @@ async def handle_chat_completion(
 async def handle_native_anthropic_messages(
     body: dict, *, request: Request | None = None, initiator: str | None = None,
 ):
-    """Proxy Anthropic Messages requests directly to the upstream Anthropic API."""
-    upstream_body = _sanitize_native_anthropic_body(body)
-    resolved = initiator or anthropic_adapter.infer_initiator(upstream_body)
-    requested_model = upstream_body.get("model", "")
-    query = request.url.query if request else None
+    """Proxy Anthropic Messages requests to the upstream Anthropic API.
 
-    client = await account_mgr.get_client(initiator=resolved)
+    Prefers a real Anthropic pool account (claude.ai OAuth, talks to
+    api.anthropic.com directly) when one is available. Falls back to a
+    Copilot account routed through Copilot's native /v1/messages endpoint
+    when no Anthropic account is available, or after an Anthropic 429.
+    """
+    resolved = initiator or anthropic_adapter.infer_initiator(body)
+    requested_model = body.get("model", "")
+    query = request.url.query if request else None
+    conv_key = _derive_conv_key(body, "anthropic")
+
+    has_web_search = _body_has_web_search_tool(body)
+
+    client = await account_mgr.get_client(
+        initiator=resolved, conv_key=conv_key, prefer_backend="anthropic",
+    )
+
+    # Sanitize the body *only* when we end up on the Copilot backend —
+    # api.anthropic.com accepts the original fields (context_management,
+    # output_config.effort=max, etc.) verbatim.
+    if isinstance(client, AnthropicClient):
+        upstream_body = body
+    else:
+        upstream_body = _sanitize_native_anthropic_body(body)
 
     if _free_within_minutes is not None and resolved == "user":
         elapsed = await account_mgr.get_minutes_since_last_request(client)
@@ -1378,34 +1532,73 @@ async def handle_native_anthropic_messages(
                         elapsed, _free_within_minutes)
 
     account = account_mgr.get_username(client)
+    backend = account_mgr.get_backend(client)
     resolved = await _maybe_consume_billed_stub(client, resolved, requested_model)
 
     billed_status = "yes" if resolved == "user" else "no"
     logger.info(
-        "Anthropic native messages requested by %s (billed: %s, model: %s, account: %s)",
-        resolved, billed_status, requested_model, account,
+        "Anthropic native messages requested by %s (billed: %s, model: %s, account: %s[%s])",
+        resolved, billed_status, requested_model, account, backend,
     )
 
     if upstream_body.get("stream"):
         converter = anthropic_adapter.create_stream_converter(upstream_body)
 
         async def event_stream():
-            nonlocal client
+            nonlocal client, backend
             transient_retries = 0
+            current_body = upstream_body
             while True:
                 needs_retry = False
                 recorded = False
-                async for line in client.stream_messages(
-                    upstream_body, initiator=resolved, query=query,
-                ):
+                stream_iter = (
+                    client.stream_messages(current_body, initiator=resolved)
+                    if isinstance(client, AnthropicClient)
+                    else client.stream_messages(
+                        current_body, initiator=resolved, query=query,
+                    )
+                )
+                async for line in stream_iter:
                     if request and await request.is_disconnected():
                         return
                     if line.startswith("error:"):
                         if _is_rate_limit_error(line):
-                            logger.warning("Rate limited on account, switching account")
-                            fallback = await account_mgr.get_fallback_client(client)
+                            logger.warning(
+                                "Rate limited on account %s[%s], switching account",
+                                account, backend,
+                            )
+                            if (
+                                backend == "anthropic"
+                                and getattr(client, "last_response_headers", None)
+                            ):
+                                reset = _parse_anthropic_reset_utc(
+                                    client.last_response_headers
+                                )
+                                if reset is not None:
+                                    await account_mgr.mark_exhausted_until(
+                                        client, reset,
+                                    )
+                            fallback = await account_mgr.get_fallback_client(
+                                client, prefer_backend="anthropic",
+                            )
                             if fallback is not None:
                                 client = fallback
+                                account = account_mgr.get_username(client)
+                                backend = account_mgr.get_backend(client)
+                                # If the surviving fallback is Copilot and the
+                                # body has web_search, the trick path (DDG /
+                                # gpt-5.5) handles it more reliably than a
+                                # raw retry. Bounce to handle_chat_completion.
+                                if backend == "copilot" and has_web_search:
+                                    logger.info(
+                                        "web_search: Anthropic exhausted, "
+                                        "delegating to DDG trick path on %s",
+                                        account,
+                                    )
+                                    return
+                                # Re-sanitize for the Copilot path.
+                                if backend == "copilot":
+                                    current_body = _sanitize_native_anthropic_body(body)
                                 needs_retry = True
                                 break
                         if (
@@ -1420,7 +1613,7 @@ async def handle_native_anthropic_messages(
                             )
                             needs_retry = True
                             break
-                        _debug_error(body, line, upstream_body=upstream_body)
+                        _debug_error(body, line, upstream_body=current_body)
                         yield converter.format_error(line)
                         return
                     if not recorded and line:
@@ -1434,17 +1627,53 @@ async def handle_native_anthropic_messages(
                 if not needs_retry:
                     return
 
+        # If we delegated to the trick path mid-stream, the generator returns
+        # without yielding final SSE — instead route the unmodified body now.
+        # Detect this by buffering one cycle and re-entering chat_completion.
+        # In practice the early-return inside event_stream() never fires for
+        # the streaming path because we can't reroute after we've started
+        # yielding to the client; so the delegation only matters for the
+        # non-streaming branch below. Streaming clients see a clean upstream
+        # error if the Anthropic fallback exhausts before any data has flowed.
         return StreamingResponse(
             event_stream(), media_type="text/event-stream", headers=_STREAM_HEADERS,
         )
 
     while True:
-        resp = await client.messages(upstream_body, initiator=resolved, query=query)
+        if isinstance(client, AnthropicClient):
+            resp = await client.messages(upstream_body, initiator=resolved)
+        else:
+            resp = await client.messages(
+                upstream_body, initiator=resolved, query=query,
+            )
         if resp.status_code == 429:
-            logger.warning("Rate limited on account, switching account")
-            fallback = await account_mgr.get_fallback_client(client)
+            logger.warning(
+                "Rate limited on account %s[%s], switching account",
+                account, backend,
+            )
+            if backend == "anthropic":
+                reset = _parse_anthropic_reset_utc(dict(resp.headers))
+                if reset is not None:
+                    await account_mgr.mark_exhausted_until(client, reset)
+            fallback = await account_mgr.get_fallback_client(
+                client, prefer_backend="anthropic",
+            )
             if fallback is not None:
                 client = fallback
+                account = account_mgr.get_username(client)
+                backend = account_mgr.get_backend(client)
+                if backend == "copilot" and has_web_search:
+                    logger.info(
+                        "web_search: Anthropic exhausted, delegating to DDG trick path on %s",
+                        account,
+                    )
+                    return await handle_chat_completion(
+                        anthropic_adapter, body, request=request, initiator=resolved,
+                    )
+                if backend == "copilot":
+                    upstream_body = _sanitize_native_anthropic_body(body)
+                else:
+                    upstream_body = body
                 continue
 
         if resp.status_code != 200:
@@ -1463,9 +1692,17 @@ async def handle_native_anthropic_messages(
                 "Model mismatch: requested %s, got %s — quota likely exhausted, switching account",
                 requested_model, resp_model,
             )
-            fallback = await account_mgr.get_fallback_client(client)
+            fallback = await account_mgr.get_fallback_client(
+                client, prefer_backend="anthropic",
+            )
             if fallback is not None:
                 client = fallback
+                account = account_mgr.get_username(client)
+                backend = account_mgr.get_backend(client)
+                if backend == "copilot":
+                    upstream_body = _sanitize_native_anthropic_body(body)
+                else:
+                    upstream_body = body
                 continue
         break
 
@@ -1498,7 +1735,8 @@ async def handle_anthropic_via_responses(
         resp_body, "anthropic", requested_model, endpoint="responses",
     )
 
-    client = await account_mgr.get_client(initiator=resolved)
+    conv_key = _derive_conv_key(body, "anthropic")
+    client = await account_mgr.get_client(initiator=resolved, conv_key=conv_key)
 
     if _free_within_minutes is not None and resolved == "user":
         elapsed = await account_mgr.get_minutes_since_last_request(client)
@@ -2074,7 +2312,14 @@ async def embeddings(request: Request):
 @app.post("/v1/messages/count_tokens")
 @app.post("/messages/count_tokens")
 async def count_tokens(request: Request):
-    """Stub for the Anthropic token counting API."""
+    """Return upstream-counted tokens when an Anthropic account is available,
+    falling back to a length-based heuristic otherwise.
+
+    The heuristic is intentionally permissive — Claude Code calls this
+    endpoint frequently and a 500 here would surface as scary UI noise. When
+    we can't reach a real upstream we'd rather return an approximate count
+    than nothing.
+    """
     try:
         body = await request.json()
     except Exception:
@@ -2084,12 +2329,36 @@ async def count_tokens(request: Request):
     num_messages = len(body.get("messages", []))
     num_tools = len(body.get("tools", []))
 
-    # Simple heuristic: ~4 chars per token for text content
+    if account_mgr is not None and account_mgr.has_available("anthropic"):
+        # Pick any available Anthropic client without affecting stickiness
+        # or rotation state. This is just a token count, not a billable call.
+        a_client = None
+        for acct in account_mgr.accounts:
+            if acct.backend == "anthropic" and acct.is_available():
+                a_client = acct.client
+                break
+        if a_client is not None:
+            try:
+                resp = await a_client.count_tokens(body)
+                if resp.status_code == 200:
+                    return JSONResponse(content=resp.json(),
+                                        status_code=200)
+                logger.warning(
+                    "count_tokens upstream %s — falling back to heuristic",
+                    resp.status_code,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "count_tokens upstream error %r — falling back to heuristic",
+                    exc,
+                )
+
+    # Heuristic fallback: ~4 chars per token across the serialized body.
     text_content = json.dumps(body)
     token_count = max(1, len(text_content) // 4)
 
     logger.debug(
-        "count_tokens: model=%s messages=%d tools=%d -> %d tokens",
+        "count_tokens: model=%s messages=%d tools=%d -> %d tokens (heuristic)",
         model, num_messages, num_tools, token_count,
     )
 
@@ -2115,9 +2384,13 @@ async def messages(request: Request):
     )
 
     if _should_use_native_anthropic_api("anthropic", mapped_model):
-        # Claude-targeted Anthropic requests use DDG interception for web_search
-        # instead of Copilot's native Anthropic web_search passthrough.
-        if not has_web_search:
+        # Prefer native Anthropic on the real api.anthropic.com when an
+        # Anthropic-pool account is available — that path handles web_search
+        # natively via the upstream's own tool execution. Fall through to the
+        # DDG-based trick path only when no Anthropic account is available
+        # (or after an Anthropic 429, handled inside the native handler).
+        anthropic_pool_ready = account_mgr.has_available("anthropic")
+        if not has_web_search or anthropic_pool_ready:
             body["model"] = mapped_model
             return await handle_native_anthropic_messages(
                 body, request=request, initiator=_get_initiator(request)

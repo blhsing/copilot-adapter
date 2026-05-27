@@ -7,6 +7,8 @@ Authenticates via GitHub's device-flow OAuth, then proxies requests to GitHub Co
 ## Key features
 
 - [**Multi-account pooling**](#multi-account) — Rotate between multiple GitHub Copilot accounts to pool premium request quotas, with automatic exhaustion detection and account switching
+- [**Claude Max subscription pooling**](#claude-max-subscription-pooling) — Pool real Claude.ai Max subscriptions alongside Copilot accounts; native ``/v1/messages`` requests prefer Anthropic accounts and fall back to Copilot when the Anthropic pool is exhausted
+- [**Conversation-keyed account stickiness**](#multi-account) — Multi-turn conversations stay pinned to one account across the pool (SHA1 of the first user message → account, 1-hour idle TTL) so billing visibility doesn't fragment across rotations
 - [**Per-account plan and quota**](#per-account-plan-and-quota) — Mix accounts on different Copilot tiers with per-account quota limits that auto-derive from the plan
 - [**Smart premium request billing**](#premium-request-billing) — Automatically avoids extra premium request charges for agentic follow-ups, with no client-side changes needed
 - [**Rate limit handling**](#premium-request-billing) — Automatically retries on rate limit errors by rotating to the next available account
@@ -137,6 +139,39 @@ For proactive switching *before* hitting the limit, set `--quota-limit N` or let
 | `enterprise` | 1000 | Same as `pro` |
 
 When `--quota-limit` is not specified, it defaults to the plan's monthly allowance.
+
+### Claude Max subscription pooling
+
+In addition to GitHub Copilot accounts, the proxy can pool real Claude.ai Max subscriptions and use them as a first-choice backend for native Anthropic `/v1/messages` traffic. Authenticate via the claude.ai PKCE paste-back flow:
+
+```bash
+python copilot_adapter.py claude-login
+# Opens the claude.ai authorize URL in your browser. Approve, then paste the
+# 'code' query parameter from the redirect URL back into the terminal.
+```
+
+Each `claude-login` adds another Max subscription to `~/.config/copilot-adapter/anthropic_tokens.json`. The proxy reads that file at startup and constructs one client per account.
+
+Routing rules (handled automatically — no config needed):
+
+- **Native `/v1/messages` for Claude targets** prefers an Anthropic-pool account first. Body is forwarded verbatim (no Copilot-style sanitization).
+- **Falls back to Copilot** when the Anthropic pool is empty or all accounts are sidelined (e.g. by upstream 429s with reset hints).
+- **`web_search_20250305` tool** runs natively through Anthropic when an Anthropic account is available. After an Anthropic 429 leaves only Copilot as the surviving backend, requests with `web_search` are delegated to the gpt-5.5 / DuckDuckGo trick path so the call doesn't fail.
+- **`/v1/messages/count_tokens`** routes to a real Anthropic account when available (returning upstream-counted tokens), with a length-based heuristic as the offline fallback so a Copilot-only deployment still works.
+
+The Anthropic backend handles 429s precisely: it parses `anthropic-ratelimit-unified-reset`, `anthropic-ratelimit-requests-reset`, and `retry-after` to set an account's `unavailable_until` exactly when the upstream says it'll be back, instead of using the generic `--rate-limit-backoff-minutes` value.
+
+#### Spoof interactive Claude Code headers
+
+`api.anthropic.com` keys off `User-Agent`, `x-app`, and the `anthropic-beta` list to classify traffic as interactive REPL vs. SDK / programmatic. Pass `--spoof-interactive-headers` (or set `COPILOT_ADAPTER_SPOOF_INTERACTIVE_HEADERS=1`) to stamp outgoing Anthropic-pool requests with the same UA / `x-app: cli` / extended beta list (`claude-code-20250219`, `interleaved-thinking-2025-05-14`, `fine-grained-tool-streaming-2025-05-14`, `prompt-caching-2024-07-31`) that the real REPL sends. Off by default — only matters for the Anthropic backend; Copilot path is untouched.
+
+#### Regenerating the MITM CA
+
+```bash
+python copilot_adapter.py regenerate-ca
+```
+
+Wipes and re-creates the local CA. All existing leaf certs become invalid; clients (Claude Code, browsers) must reinstall the new CA before MITM works again.
 
 ### Config file
 

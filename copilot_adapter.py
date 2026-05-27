@@ -86,6 +86,59 @@ def login():
     device_flow_login()
 
 
+@main.command("claude-login")
+@click.option("--plan", default="max",
+              help="Plan label for the Anthropic account (informational; "
+                   "Anthropic Max subscriptions don't expose a quota). "
+                   "Default: 'max'.")
+@click.option("--quota-limit", default=None, type=int, metavar="N",
+              help="Optional synthetic quota for usage tracking. "
+                   "Exhaustion comes from upstream 429s, not arithmetic.")
+def claude_login(plan: str, quota_limit: int | None):
+    """Authenticate against claude.ai via PKCE paste-back OAuth.
+
+    Adds the resulting Claude Max subscription to the Anthropic accounts
+    cache. The proxy prefers Anthropic-pool accounts for native
+    ``/v1/messages`` traffic, falling back to Copilot when the Anthropic
+    pool is exhausted.
+    """
+    from lib.anthropic_auth import claude_login_interactive
+    result = claude_login_interactive(plan=plan, quota_limit=quota_limit)
+    if result is None:
+        raise click.ClickException("Login aborted or failed.")
+
+
+@main.command("regenerate-ca")
+@click.option("--ca-dir", default=None, metavar="DIR",
+              envvar="COPILOT_ADAPTER_CA_DIR",
+              help="Directory holding the CA certificate and key.")
+@click.confirmation_option(prompt="Regenerate the MITM CA? Existing leaf "
+                                  "certs become invalid and clients must "
+                                  "reinstall the new CA before MITM works.")
+def regenerate_ca(ca_dir: str | None):
+    """Wipe and regenerate the MITM CA certificate.
+
+    Clients (Claude Code, curl, browsers) must reinstall the new CA into
+    their trust store afterwards — until they do, intercepted HTTPS will
+    fail with a certificate-validation error.
+    """
+    from lib.cert import ca_paths, ensure_ca
+
+    d = Path(ca_dir) if ca_dir else None
+    cert_path, key_path = ca_paths(d)
+    for p in (cert_path, key_path):
+        if p.exists():
+            p.unlink()
+    cert, _ = ensure_ca(d)
+    print(f"Regenerated CA at {cert_path}")
+    print(f"  Subject: {cert.subject.rfc4514_string()}")
+    print(f"  Valid:   {cert.not_valid_before_utc:%Y-%m-%d} to "
+          f"{cert.not_valid_after_utc:%Y-%m-%d}")
+    print(f"\nReinstall this CA in your client trust stores:")
+    print(f"  Node.js:  export NODE_EXTRA_CA_CERTS={cert_path}")
+    print(f"  Windows:  certutil -addstore -f Root {cert_path}")
+
+
 @main.command()
 @click.option("--username", default=None, metavar="USER",
               help="Remove a specific account by GitHub username.")
@@ -382,6 +435,14 @@ def config(tool: str, revert: bool, host: str, port: int,
                    "Defaults to 127.0.0.1; set to the IP of your front proxy "
                    "(e.g. a Squid host) or '*' to honor the header from "
                    "anywhere.")
+@click.option("--spoof-interactive-headers", "spoof_interactive", is_flag=True,
+              default=False, envvar="COPILOT_ADAPTER_SPOOF_INTERACTIVE_HEADERS",
+              help="When forwarding Anthropic-pool requests, stamp them with "
+                   "the User-Agent, x-app, and extended anthropic-beta list "
+                   "that the interactive Claude Code REPL sends. Default off — "
+                   "the giveaway pool UA otherwise tells api.anthropic.com "
+                   "this is not a real REPL session. Has no effect on Copilot "
+                   "traffic.")
 def serve(config_path: str | None, host: str | None, port: int | None,
           github_token: tuple[str, ...], cors_origin: tuple[str, ...],
           workers: int | None, strategy: str | None,
@@ -398,7 +459,8 @@ def serve(config_path: str | None, host: str | None, port: int | None,
           web_search_model: str | None,
           reverse_dns_server: str | None,
           reverse_dns_sync_wait_ms: int | None,
-          forwarded_allow_ips: str | None):
+          forwarded_allow_ips: str | None,
+          spoof_interactive: bool):
     """Start the OpenAI-compatible API server."""
     import uvicorn
 
@@ -406,6 +468,13 @@ def serve(config_path: str | None, host: str | None, port: int | None,
     from lib.auth import get_cached_account_meta, resolve_github_tokens
     from lib.server import init_app
     from lib.logging import build_runtime_logging_config
+    from lib.anthropic_auth import resolve_anthropic_accounts
+    import lib.anthropic_client as _anthropic_client_module
+
+    # Spoof toggle must be set before AccountManager constructs AnthropicClient
+    # instances so the first request out the door already uses the right UA.
+    spoof_interactive = spoof_interactive or False
+    _anthropic_client_module.SPOOF_INTERACTIVE = spoof_interactive
 
     # --- Load config file (lowest precedence) ---
     cfg = _load_config(config_path)
@@ -540,10 +609,23 @@ def serve(config_path: str | None, host: str | None, port: int | None,
         accounts.append({
             "token": token,
             "username": username,
+            "backend": "copilot",
             "plan": overrides.get("plan", plan),
             "quota_limit": overrides.get("quota_limit", quota_limit),
             "premium_used": overrides.get("premium_used", 0),
         })
+
+    # Anthropic accounts come from their own on-disk cache (claude.ai PKCE
+    # flow). Each entry already has access_token / refresh_token / expires_at
+    # — the AccountManager constructs an AnthropicTokenManager + AnthropicClient
+    # per entry.
+    anthropic_accounts = []
+    try:
+        for a in resolve_anthropic_accounts():
+            anthropic_accounts.append({**a, "backend": "anthropic"})
+            accounts.append({**a, "backend": "anthropic"})
+    except Exception as exc:
+        print(f"  Warning: could not load Anthropic accounts: {exc}")
 
     acct_mgr = AccountManager(
         accounts, strategy=strategy, quota_limit=quota_limit, plan=plan,
@@ -557,10 +639,18 @@ def serve(config_path: str | None, host: str | None, port: int | None,
         raise click.ClickException(f"Failed to get Copilot token: {e}")
 
     n = len(accounts)
-    print(f"\nConfigured {n} account(s), strategy: {strategy}")
+    n_anthropic = len(anthropic_accounts)
+    n_copilot = n - n_anthropic
+    print(f"\nConfigured {n} account(s) ({n_copilot} copilot, "
+          f"{n_anthropic} anthropic), strategy: {strategy}")
     for acct in acct_mgr.accounts:
         limit_str = str(acct.premium_limit) if acct.premium_limit is not None else "unset"
-        print(f"  - {acct.username} (plan: {acct.plan}, usage: {acct.premium_used}/{limit_str})")
+        backend_tag = f"[{acct.backend}]"
+        print(f"  - {acct.username} {backend_tag} (plan: {acct.plan}, "
+              f"usage: {acct.premium_used}/{limit_str})")
+    if spoof_interactive:
+        print("\n** Spoof interactive headers: Anthropic-pool requests will "
+              "carry the REPL's User-Agent / x-app / extended anthropic-beta **")
     if force_free:
         print("\n** Free mode enabled: all requests will be marked as agent-initiated **")
     if free_within_minutes is not None:
@@ -619,6 +709,8 @@ def serve(config_path: str | None, host: str | None, port: int | None,
             os.environ["_COPILOT_ADAPTER_REVERSE_DNS_SERVER"] = reverse_dns_server
         if reverse_dns_sync_wait_ms is not None:
             os.environ["_COPILOT_ADAPTER_REVERSE_DNS_SYNC_WAIT_MS"] = str(reverse_dns_sync_wait_ms)
+        if spoof_interactive:
+            os.environ["_COPILOT_ADAPTER_SPOOF_INTERACTIVE"] = "1"
 
         uvicorn.run(
             "lib.server:app", host=host, port=port,

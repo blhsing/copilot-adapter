@@ -379,10 +379,17 @@ async def _handle_rewrite_mitm(client_reader: asyncio.StreamReader,
                                client_writer: asyncio.StreamWriter,
                                original_host: str,
                                internal_host: str,
-                               internal_port: int):
+                               internal_port: int,
+                               peer_ip: str | None = None):
     """Parse HTTP requests from a MITM'd API connection and forward them
     to the internal Uvicorn server (for API paths) or the original host
-    (for everything else)."""
+    (for everything else).
+
+    When *peer_ip* is set, an ``X-Forwarded-For`` header is injected on the
+    loopback hop so Uvicorn sees the real client IP (instead of 127.0.0.1)
+    when ``forwarded_allow_ips`` includes the loopback address. Any inbound
+    ``X-Forwarded-For`` / ``X-Real-Client-IP`` / ``X-Real-IP`` is stripped
+    before re-injection to prevent clients from spoofing their source IP."""
     try:
         while True:
             request_line = await _read_request_line(client_reader)
@@ -396,12 +403,21 @@ async def _handle_rewrite_mitm(client_reader: asyncio.StreamReader,
                 # Route to internal Uvicorn (reroute to Copilot)
                 req_desc = request_line.rstrip(b"\r\n").decode("ascii", errors="replace")
                 logger.debug("Rerouting %s -> %s to adapter", original_host, req_desc)
+                # Strip client-sent forwarding headers so they can't spoof a
+                # source IP; re-inject our own based on the outer-socket peer.
+                _ANTI_SPOOF = (
+                    b"host", b"x-forwarded-for", b"x-real-client-ip",
+                    b"x-real-ip", b"forwarded",
+                )
                 fwd_headers = [
                     (n, v) for n, v in headers
-                    if n.lower() != b"host"
+                    if n.lower() not in _ANTI_SPOOF
                 ]
                 host_val = f"{internal_host}:{internal_port}".encode()
                 fwd_headers.append((b"Host", host_val))
+                if peer_ip:
+                    fwd_headers.append((b"X-Forwarded-For", peer_ip.encode("ascii")))
+                    fwd_headers.append((b"X-Real-Client-IP", peer_ip.encode("ascii")))
                 raw = _serialize_request(request_line, fwd_headers, body)
                 try:
                     up_reader, up_writer = await asyncio.open_connection(
@@ -552,12 +568,13 @@ async def _handle_connect(host: str, port: int,
                           writer: asyncio.StreamWriter,
                           ca_cert, ca_key,
                           internal_host: str = "127.0.0.1",
-                          internal_port: int = 0):
+                          internal_port: int = 0,
+                          peer_ip: str | None = None):
     """Handle a CONNECT tunnel request."""
     # Consume remaining headers
     await _read_headers(reader)
     await _do_connect(host, port, reader, writer, ca_cert, ca_key,
-                      internal_host, internal_port)
+                      internal_host, internal_port, peer_ip)
 
 
 async def _handle_connect_pre_read(host: str, port: int,
@@ -565,17 +582,19 @@ async def _handle_connect_pre_read(host: str, port: int,
                                    writer: asyncio.StreamWriter,
                                    ca_cert, ca_key,
                                    internal_host: str = "127.0.0.1",
-                                   internal_port: int = 0):
+                                   internal_port: int = 0,
+                                   peer_ip: str | None = None):
     """Handle a CONNECT request when headers have already been consumed."""
     await _do_connect(host, port, reader, writer, ca_cert, ca_key,
-                      internal_host, internal_port)
+                      internal_host, internal_port, peer_ip)
 
 
 async def _do_connect(host: str, port: int,
                       reader: asyncio.StreamReader,
                       writer: asyncio.StreamWriter,
                       ca_cert, ca_key,
-                      internal_host: str, internal_port: int):
+                      internal_host: str, internal_port: int,
+                      peer_ip: str | None = None):
     """Core CONNECT handling after headers are consumed."""
     # Respond 200
     writer.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
@@ -592,7 +611,8 @@ async def _do_connect(host: str, port: int,
             await _handle_copilot_mitm(tls_reader, tls_writer)
         else:
             await _handle_rewrite_mitm(tls_reader, tls_writer,
-                                       host, internal_host, internal_port)
+                                       host, internal_host, internal_port,
+                                       peer_ip)
     else:
         logger.debug("Blind relay CONNECT to %s:%d", host, port)
         try:
@@ -751,6 +771,9 @@ class DualModeServer:
     async def _handle_client(self, reader: asyncio.StreamReader,
                              writer: asyncio.StreamWriter):
         """Dispatch a new connection based on the first request line."""
+        peername = writer.get_extra_info("peername")
+        peer_ip = peername[0] if peername else None
+
         first_line = await _read_request_line(reader)
         if not first_line:
             writer.close()
@@ -804,7 +827,8 @@ class DualModeServer:
                 # _handle_connect normally reads headers itself; pass pre-read
                 await _handle_connect_pre_read(host, port, reader, writer,
                                                self._ca_cert, self._ca_key,
-                                               self._internal_host, self._internal_port)
+                                               self._internal_host, self._internal_port,
+                                               peer_ip)
             else:
                 await _handle_plain_http_pre_read(
                     method, parts[1],
@@ -823,7 +847,8 @@ class DualModeServer:
                 port = 443
             await _handle_connect(host, port, reader, writer,
                                   self._ca_cert, self._ca_key,
-                                  self._internal_host, self._internal_port)
+                                  self._internal_host, self._internal_port,
+                                  peer_ip)
 
         elif parts[1].startswith(b"http://") or parts[1].startswith(b"https://"):
             # Absolute URL → plain HTTP forward proxy
