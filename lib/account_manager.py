@@ -384,16 +384,23 @@ class AccountManager:
         *,
         prefer_backend: str | None = None,
     ) -> Optional[Any]:
-        """Return the next available client after temporarily sidelining
-        *failed_client*. Tries the preferred backend first if specified, then
-        any backend. Returns ``None`` if no other accounts are available."""
+        """Sideline *failed_client* and return the next available client.
+
+        Tries the preferred backend first if specified, then any backend.
+        Returns ``None`` if no other accounts are available — callers should
+        surface the upstream error in that case. The failed account is always
+        sidelined (even when no fallback exists) so that subsequent requests
+        back off instead of hammering an account known to be rate-limited.
+        """
         async with self._lock:
             self._sweep_conv_cache_locked()
-            # Same-backend candidates first (or filtered by prefer_backend).
+            # Identify the failed account's backend, then sideline it
+            # unconditionally before evaluating fallback candidates.
             failed_backend = None
             for acct in self._accounts:
                 if acct.client is failed_client:
                     failed_backend = acct.backend
+                    self._mark_unavailable_locked(acct)
                     break
 
             target_backend = prefer_backend or failed_backend
@@ -414,11 +421,6 @@ class AccountManager:
                 ]
             if not available:
                 return None
-            # Sideline only after we've confirmed a fallback exists.
-            for acct in self._accounts:
-                if acct.client is failed_client:
-                    self._mark_unavailable_locked(acct)
-                    break
             return available[0].client
 
     def _mark_unavailable_locked(self, acct: AccountInfo) -> None:

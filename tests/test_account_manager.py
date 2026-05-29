@@ -1,3 +1,5 @@
+import time
+
 import pytest
 import pytest_asyncio
 pytestmark = pytest.mark.asyncio
@@ -156,6 +158,17 @@ class TestExhaustionDetection:
         mgr._accounts[1].exhausted = True
         result = await mgr.get_fallback_client(mgr._accounts[0].client)
         assert result is None
+
+    async def test_get_fallback_sidelines_even_without_fallback(self):
+        # When every other account is already sidelined, the failed account
+        # must still be sidelined so that subsequent requests back off rather
+        # than hammering it repeatedly.
+        mgr = _make_manager(2, "round-robin")
+        mgr._accounts[1].unavailable_until = time.time() + 60
+        result = await mgr.get_fallback_client(mgr._accounts[0].client)
+        assert result is None
+        assert mgr._accounts[0].is_available() is False
+        assert mgr._accounts[0].unavailable_until is not None
 
     async def test_sidelined_account_recovers_after_backoff(self):
         # Use a 0-second back-off so the sidelined account is immediately
