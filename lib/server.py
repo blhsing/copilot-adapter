@@ -45,6 +45,9 @@ _force_ddg_web_search: bool = False
 # against this model so they use the provider-native web_search_preview tool
 # instead of DuckDuckGo.
 _web_search_model: str | None = None
+# Per-client allowlist pinning matching clients to the Copilot backend (so they
+# never consume the Anthropic or ChatGPT pools). None = no allowlist.
+_copilot_only_matcher: "CopilotOnlyMatcher | None" = None
 openai_adapter = OpenAIAdapter()
 anthropic_adapter = AnthropicAdapter()
 
@@ -658,6 +661,7 @@ async def _lifespan(application: FastAPI):
     global _web_search_max_iterations
     global _force_ddg_web_search
     global _web_search_model
+    global _copilot_only_matcher
     tokens_raw = os.environ.get("_COPILOT_ADAPTER_GITHUB_TOKENS", "")
     if tokens_raw and account_mgr is None:
         _force_free = os.environ.get("_COPILOT_ADAPTER_FREE", "") == "1"
@@ -692,6 +696,14 @@ async def _lifespan(application: FastAPI):
                 accounts.append({**a, "backend": "anthropic"})
         except Exception as exc:
             logger.debug("No Anthropic accounts loaded: %s", exc)
+
+        # ChatGPT (Codex) accounts likewise come from the on-disk cache.
+        try:
+            from .openai_auth import resolve_chatgpt_accounts
+            for a in resolve_chatgpt_accounts():
+                accounts.append({**a, "backend": "chatgpt"})
+        except Exception as exc:
+            logger.debug("No ChatGPT accounts loaded: %s", exc)
 
         # Spoof flag flows through the env too — module-level on AnthropicClient.
         if os.environ.get("_COPILOT_ADAPTER_SPOOF_INTERACTIVE", "") == "1":
@@ -732,6 +744,21 @@ async def _lifespan(application: FastAPI):
             _web_search_max_iterations = int(ws_max_raw)
         _force_ddg_web_search = os.environ.get("_COPILOT_ADAPTER_FORCE_DDG_WEB_SEARCH", "") == "1"
         _web_search_model = os.environ.get("_COPILOT_ADAPTER_WEB_SEARCH_MODEL") or None
+
+    # Copilot-only allowlist + usage poller apply to both launch paths (env-driven
+    # multi-worker above, and the init_app single-process path), so they live
+    # outside the tokens_raw block.
+    copilot_only_raw = os.environ.get("_COPILOT_ADAPTER_COPILOT_ONLY_CLIENTS", "")
+    if copilot_only_raw and _copilot_only_matcher is None:
+        _copilot_only_matcher = CopilotOnlyMatcher(copilot_only_raw.split(","))
+
+    # Start the live-utilization poller for whichever AccountManager is active
+    # (built above for multi-worker, or installed via init_app for single-proc).
+    if account_mgr is not None:
+        try:
+            account_mgr.start_usage_poller()
+        except Exception as exc:
+            logger.debug("usage poller not started: %s", exc)
     yield
 
 
@@ -832,6 +859,72 @@ def _client_ip(request: Request | None) -> str | None:
     return None
 
 
+class CopilotOnlyMatcher:
+    """Pins matching clients to the Copilot backend. Each rule is an IP literal,
+    a CIDR range, or a reverse-DNS hostname glob (``*``/``?``). Mirrors the .NET
+    sibling's CopilotOnlyClientMatcher."""
+
+    def __init__(self, rules: list[str]):
+        import ipaddress
+        self._ips: list = []
+        self._nets: list = []
+        self._host_globs: list[str] = []
+        for raw in rules:
+            rule = (raw or "").strip()
+            if not rule:
+                continue
+            try:
+                if "/" in rule:
+                    self._nets.append(ipaddress.ip_network(rule, strict=False))
+                    continue
+                self._ips.append(ipaddress.ip_address(rule))
+                continue
+            except ValueError:
+                pass
+            self._host_globs.append(rule.lower())
+
+    @property
+    def has_hostname_rules(self) -> bool:
+        return bool(self._host_globs)
+
+    @property
+    def is_empty(self) -> bool:
+        return not (self._ips or self._nets or self._host_globs)
+
+    def matches(self, client_ip: str | None, hostname: str | None) -> bool:
+        import ipaddress
+        from fnmatch import fnmatch
+        if client_ip:
+            try:
+                ip = ipaddress.ip_address(client_ip)
+                if any(ip == x for x in self._ips):
+                    return True
+                if any(ip in net for net in self._nets):
+                    return True
+            except ValueError:
+                pass
+        if hostname and self._host_globs:
+            h = hostname.lower()
+            if any(fnmatch(h, g) for g in self._host_globs):
+                return True
+        return False
+
+
+def _force_copilot_for(request: Request | None) -> bool:
+    """True when the request's client matches the Copilot-Only allowlist."""
+    if _copilot_only_matcher is None or _copilot_only_matcher.is_empty:
+        return False
+    ip = _client_ip(request)
+    hostname = None
+    if _copilot_only_matcher.has_hostname_rules and ip:
+        try:
+            import socket
+            hostname = socket.gethostbyaddr(ip)[0]
+        except Exception:
+            hostname = None
+    return _copilot_only_matcher.matches(ip, hostname)
+
+
 def _derive_conv_key(body: dict, source_provider: str) -> str | None:
     """Compute a stable conversation key from the first user message.
 
@@ -879,6 +972,55 @@ def _derive_conv_key(body: dict, source_provider: str) -> str | None:
         (source_provider + "\0" + text).encode("utf-8", errors="replace")
     ).hexdigest()
     return digest
+
+
+def _derive_responses_conv_key(body: dict) -> str | None:
+    """Conversation key for an OpenAI /v1/responses body.
+
+    Prefer ``previous_response_id`` (provider-specific — pins follow-ups to the
+    account that issued the prior response; cross-account replay 401s). Else
+    hash the first user message in ``input`` (string or array-of-items shape —
+    Codex grows the array each turn but the first user item stays constant).
+    """
+    prev = body.get("previous_response_id")
+    if isinstance(prev, str) and prev:
+        return prev
+    inp = body.get("input")
+    text = None
+    if isinstance(inp, str):
+        text = inp
+    elif isinstance(inp, list):
+        for item in inp:
+            if not isinstance(item, dict) or item.get("role") != "user":
+                continue
+            content = item.get("content")
+            if isinstance(content, str):
+                text = content
+            elif isinstance(content, list):
+                parts = [p.get("text") for p in content
+                         if isinstance(p, dict) and isinstance(p.get("text"), str)]
+                text = "\n".join(parts)
+            if text:
+                break
+    if not text:
+        return None
+    return hashlib.sha1(("openai\0" + text).encode("utf-8", errors="replace")).hexdigest()
+
+
+def _extract_responses_id(line: str) -> str | None:
+    """Pull the first ``"id":"resp_..."`` out of an SSE data line, or None."""
+    marker = '"id":"resp_'
+    i = line.find(marker)
+    if i < 0:
+        return None
+    start = i + len(marker) - len("resp_")
+    end = line.find('"', start)
+    return line[start:end] if end > start else None
+
+
+_DEFAULT_RESPONSES_INSTRUCTIONS = (
+    "You are Codex, based on GPT-5, running as a coding assistant."
+)
 
 
 def _parse_anthropic_reset_utc(headers: dict) -> float | None:
@@ -1512,8 +1654,11 @@ async def handle_native_anthropic_messages(
 
     has_web_search = _body_has_web_search_tool(body)
 
+    # Copilot-only clients never consume the Anthropic pool — force Copilot
+    # (which serves native /v1/messages too via the trick path).
+    preferred = "copilot" if _force_copilot_for(request) else "anthropic"
     client = await account_mgr.get_client(
-        initiator=resolved, conv_key=conv_key, prefer_backend="anthropic",
+        initiator=resolved, conv_key=conv_key, prefer_backend=preferred,
     )
 
     # Sanitize the body *only* when we end up on the Copilot backend —
@@ -2168,7 +2313,19 @@ async def responses(request: Request):
             body, "anthropic", requested_model, endpoint="responses"
         )
 
-    client = await account_mgr.get_client(initiator=initiator)
+    # The ChatGPT Codex backend rejects requests without an `instructions`
+    # field. Codex CLI always supplies one; inject a default for any other
+    # client that doesn't. It's a valid Responses field on Copilot too.
+    if not body.get("instructions"):
+        body["instructions"] = _DEFAULT_RESPONSES_INSTRUCTIONS
+
+    # Prefer the ChatGPT (Codex) pool, fall back to Copilot — unless this client
+    # is pinned Copilot-only. Conversation stickiness pins multi-turn Codex
+    # sessions (previous_response_id is account-specific).
+    conv_key = _derive_responses_conv_key(body)
+    client = await account_mgr.get_responses_client(
+        initiator=initiator, conv_key=conv_key,
+        force_copilot=_force_copilot_for(request))
 
     # Time-based free override
     if _free_within_minutes is not None and initiator == "user":
@@ -2191,9 +2348,15 @@ async def responses(request: Request):
             while True:
                 first_chunk = True
                 needs_retry = False
+                resp_id_captured = False
                 async for line in client.stream_responses(body, initiator=initiator):
                     if request and await request.is_disconnected():
                         return
+                    if not resp_id_captured and conv_key is not None:
+                        rid = _extract_responses_id(line)
+                        if rid:
+                            await account_mgr.remember_conversation(rid, client)
+                            resp_id_captured = True
                     if line.startswith("error:"):
                         if _is_rate_limit_error(line):
                             logger.warning("Rate limited on account, switching account")
@@ -2268,8 +2431,9 @@ async def responses(request: Request):
                 client = fallback
                 continue
         break
-    if not _force_free and initiator == "user":
-        await account_mgr.record_usage(client, requested_model)
+    rid = resp_data.get("id") if isinstance(resp_data, dict) else None
+    if isinstance(rid, str) and rid:
+        await account_mgr.remember_conversation(rid, client)
     await account_mgr.record_request_time(client)
     return JSONResponse(content=resp_data, status_code=resp.status_code)
 

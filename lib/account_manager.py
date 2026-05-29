@@ -25,67 +25,21 @@ import time
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from lib.auth import CopilotTokenManager, update_account
+from lib.auth import CopilotTokenManager, update_account  # noqa: F401  (update_account kept for callers)
 from lib.client import CopilotClient
 from lib.anthropic_auth import (
     AnthropicTokenManager,
     update_anthropic_account_tokens,
-    update_anthropic_account_usage,
 )
 from lib.anthropic_client import AnthropicClient
+from lib.openai_auth import OpenAITokenManager, update_chatgpt_account_tokens
+from lib.chatgpt_client import ChatGPTClient
 
 logger = logging.getLogger(__name__)
 
-# Premium request multipliers per plan type.
-# Source: https://docs.github.com/en/copilot/concepts/billing/copilot-requests
-# Models not listed default to 1.
-_PAID_MULTIPLIERS: dict[str, float] = {
-    # Free (0x)
-    "gpt-4.1": 0,
-    "gpt-4o": 0,
-    "gpt-5-mini": 0,
-    "raptor-mini": 0,
-    # Discounted (0.25x)
-    "grok-code-fast-1": 0.25,
-    # Discounted (0.33x)
-    "claude-haiku-4.5": 0.33,
-    "gemini-3-flash": 0.33,
-    "gpt-5.1-codex-mini": 0.33,
-    "gpt-5.4-mini": 0.33,
-    # Standard (1x) — omitted, default is 1
-    # Premium (3x)
-    "claude-opus-4.5": 3,
-    "claude-opus-4.6": 3,
-    # Ultra premium (7.5x)
-    "claude-opus-4.7": 7.5,
-}
-
-# On the Free plan, every available model costs 1 premium request.
-_FREE_MULTIPLIERS: dict[str, float] = {}  # empty = all default to 1
-
-PLAN_MULTIPLIERS: dict[str, dict[str, float]] = {
-    "free": _FREE_MULTIPLIERS,
-    "pro": _PAID_MULTIPLIERS,
-    "pro+": _PAID_MULTIPLIERS,
-    "business": _PAID_MULTIPLIERS,
-    "enterprise": _PAID_MULTIPLIERS,
-    # Anthropic Max subscriptions don't expose a quota; we still track usage
-    # for visibility but exhaustion comes from upstream 429s, not arithmetic.
-    "max": _PAID_MULTIPLIERS,
-    "max-5x": _PAID_MULTIPLIERS,
-    "max-20x": _PAID_MULTIPLIERS,
-}
-
-# Default monthly premium request quota per plan.
-PLAN_QUOTAS: dict[str, int] = {
-    "free": 50,
-    "pro": 300,
-    "pro+": 1500,
-    "business": 300,
-    "enterprise": 1000,
-}
-
-VALID_PLANS = tuple(PLAN_MULTIPLIERS.keys())
+# Rotation is driven by live backend utilization (see fetch_usage on the
+# clients), not a local premium-request counter — Copilot moved to credit-based
+# pricing, which made the old per-model multiplier / quota model meaningless.
 
 # Conversation-key stickiness TTL — matches the .NET sibling's 60-minute idle
 # eviction. Long enough that a Claude Code session never falls out of cache
@@ -94,47 +48,21 @@ VALID_PLANS = tuple(PLAN_MULTIPLIERS.keys())
 CONV_STICKY_TTL_SECONDS = 60 * 60
 
 
-def get_model_multiplier(model: str, plan: str = "pro") -> float:
-    """Return the premium request multiplier for a model.
-
-    Uses prefix matching to handle date-suffixed model IDs
-    (e.g. ``gpt-4o-2024-07-18`` matches ``gpt-4o``).
-    Defaults to 1 for unknown models.
-    """
-    multipliers = PLAN_MULTIPLIERS.get(plan, _PAID_MULTIPLIERS)
-    if not multipliers:
-        return 1.0
-    if model in multipliers:
-        return multipliers[model]
-    # Try prefix match (longest prefix wins)
-    best_match = ""
-    for prefix in multipliers:
-        if model.startswith(prefix) and len(prefix) > len(best_match):
-            best_match = prefix
-    if best_match:
-        return multipliers[best_match]
-    return 1.0
-
-
 @dataclass
 class AccountInfo:
-    """Tracks state for one pooled account (Copilot or Anthropic)."""
+    """Tracks state for one pooled account (Copilot, Anthropic, or ChatGPT)."""
 
     token: str
     username: str
-    backend: str  # "copilot" | "anthropic"
-    token_manager: Any  # CopilotTokenManager | AnthropicTokenManager
-    client: Any  # CopilotClient | AnthropicClient
-    plan: str = "pro"
-    premium_used: float = 0
-    premium_limit: int | None = None  # None = unknown
-    exhausted: bool = False  # permanent quota exhaustion (clears only on restart)
-    unavailable_until: float | None = None  # transient back-off (e.g. rate limit)
+    backend: str  # "copilot" | "anthropic" | "chatgpt"
+    token_manager: Any  # CopilotTokenManager | AnthropicTokenManager | OpenAITokenManager
+    client: Any  # CopilotClient | AnthropicClient | ChatGPTClient
+    account_id: str | None = None  # chatgpt-account-id (chatgpt backend only)
+    utilization: float | None = None  # live 0..1 from the usage poller; None = no signal
+    unavailable_until: float | None = None  # transient back-off (rate limit / model mismatch)
     last_request_time: float | None = None
 
     def is_available(self) -> bool:
-        if self.exhausted:
-            return False
         if self.unavailable_until is not None and time.time() < self.unavailable_until:
             return False
         return True
@@ -153,26 +81,30 @@ class AccountManager:
     with the conv-cache check first so multi-turn user sessions stay sticky.
     """
 
-    STRATEGIES = ("max-usage", "min-usage", "round-robin")
+    # least-utilized (default) rotates by live backend utilization; round-robin
+    # ignores it. The legacy max-usage/min-usage strategies are gone (quota model
+    # removed) and map to least-utilized.
+    STRATEGIES = ("least-utilized", "round-robin")
 
     def __init__(
         self,
         accounts: list[dict],
-        strategy: str = "max-usage",
-        quota_limit: int | None = None,
-        plan: str = "pro",
+        strategy: str = "least-utilized",
         rate_limit_backoff_seconds: int = 3600,
+        **_legacy,  # absorb removed quota_limit/plan kwargs from old callers
     ):
+        if strategy in ("max-usage", "min-usage"):
+            strategy = "least-utilized"
         if strategy not in self.STRATEGIES:
             raise ValueError(f"Unknown strategy: {strategy!r}")
         if not accounts:
             raise ValueError("At least one account is required")
 
         self._strategy = strategy
-        self._plan = plan
         self._rate_limit_backoff_seconds = rate_limit_backoff_seconds
         self._lock = asyncio.Lock()
         self._rr_index = -1
+        self._usage_task = None
 
         # Per-backend last-user account, so an Anthropic conversation's agent
         # follow-up doesn't get pinned to a Copilot account.
@@ -187,21 +119,17 @@ class AccountManager:
                 acct = {"token": acct[0], "username": acct[1]}
             backend = acct.get("backend", "copilot")
             if backend == "copilot":
-                self._accounts.append(self._build_copilot(acct, quota_limit, plan))
+                self._accounts.append(self._build_copilot(acct))
             elif backend == "anthropic":
-                self._accounts.append(self._build_anthropic(acct, quota_limit))
+                self._accounts.append(self._build_anthropic(acct))
+            elif backend == "chatgpt":
+                self._accounts.append(self._build_chatgpt(acct))
             else:
                 raise ValueError(f"Unknown backend: {backend!r}")
 
-    def _build_copilot(self, acct: dict, default_quota: int | None,
-                       default_plan: str) -> AccountInfo:
+    def _build_copilot(self, acct: dict) -> AccountInfo:
         token = acct["token"]
         username = acct["username"]
-        acct_plan = acct.get("plan", default_plan)
-        acct_limit = acct.get("quota_limit", default_quota)
-        acct_used = round(acct.get("premium_used", 0), 2)
-        if acct_limit is None:
-            acct_limit = PLAN_QUOTAS.get(acct_plan)
         tm = CopilotTokenManager(token)
         client = CopilotClient(tm)
         return AccountInfo(
@@ -210,20 +138,13 @@ class AccountManager:
             backend="copilot",
             token_manager=tm,
             client=client,
-            plan=acct_plan,
-            premium_used=acct_used,
-            premium_limit=acct_limit,
         )
 
-    def _build_anthropic(self, acct: dict,
-                         default_quota: int | None) -> AccountInfo:
+    def _build_anthropic(self, acct: dict) -> AccountInfo:
         username = acct["username"]
         access_token = acct["access_token"]
         refresh_token = acct.get("refresh_token", "")
         expires_at = float(acct.get("expires_at", 0))
-        acct_plan = acct.get("plan", "max")
-        acct_limit = acct.get("quota_limit", default_quota)
-        acct_used = round(acct.get("premium_used", 0), 2)
 
         def _on_rotated(new_access: str, new_refresh: str, new_expires: float):
             update_anthropic_account_tokens(username, new_access,
@@ -239,9 +160,30 @@ class AccountManager:
             backend="anthropic",
             token_manager=tm,
             client=client,
-            plan=acct_plan,
-            premium_used=acct_used,
-            premium_limit=acct_limit,
+        )
+
+    def _build_chatgpt(self, acct: dict) -> AccountInfo:
+        username = acct["username"]
+        access_token = acct["access_token"]
+        refresh_token = acct.get("refresh_token", "")
+        expires_at = float(acct.get("expires_at", 0))
+        account_id = acct.get("account_id")
+
+        def _on_rotated(new_access: str, new_refresh: str, new_expires: float):
+            update_chatgpt_account_tokens(username, new_access,
+                                          new_refresh, new_expires)
+
+        tm = OpenAITokenManager(
+            access_token, refresh_token, expires_at, on_rotated=_on_rotated,
+        )
+        client = ChatGPTClient(tm, account_id, account_label=username)
+        return AccountInfo(
+            token=access_token,
+            username=username,
+            backend="chatgpt",
+            token_manager=tm,
+            client=client,
+            account_id=account_id,
         )
 
     @property
@@ -310,7 +252,7 @@ class AccountManager:
                 cache_backend = prefer_backend
                 if cache_backend is None:
                     # Try every backend the conv has touched; first match wins.
-                    for be in ("anthropic", "copilot"):
+                    for be in ("anthropic", "chatgpt", "copilot"):
                         hit = self._conv_cache.get((conv_key, be))
                         if hit is not None and hit[0].is_available():
                             hit[0]  # noqa: keep reference
@@ -334,7 +276,7 @@ class AccountManager:
                                 sticky, time.time())
                         return sticky.client
                 else:
-                    for be in ("anthropic", "copilot"):
+                    for be in ("anthropic", "chatgpt", "copilot"):
                         sticky = self._last_user_by_backend.get(be)
                         if sticky is not None and sticky.is_available():
                             if conv_key is not None:
@@ -350,34 +292,47 @@ class AccountManager:
             return acct.client
 
     async def record_usage(self, client: Any, model: str) -> None:
-        """Record a premium request for the account owning *client*."""
-        username = None
-        backend = None
-        usage = 0.0
+        """No-op. The local premium-usage counter was removed (Copilot's
+        credit-based pricing made it meaningless); rotation uses live
+        utilization instead. Kept so existing call sites don't break."""
+        return
+
+    async def remember_conversation(self, conv_key: str | None, client: Any) -> None:
+        """Pin *conv_key* to the account owning *client*. Used by /v1/responses
+        to map an upstream response id (the next turn's previous_response_id)
+        back to its account — Responses ids are provider-specific."""
+        if not conv_key or client is None:
+            return
         async with self._lock:
             for acct in self._accounts:
                 if acct.client is client:
-                    multiplier = get_model_multiplier(model, acct.plan)
-                    if multiplier == 0:
-                        return
-                    acct.premium_used = round(acct.premium_used + multiplier, 2)
-                    username = acct.username
-                    backend = acct.backend
-                    usage = acct.premium_used
-                    if (acct.premium_limit is not None
-                            and acct.premium_used >= acct.premium_limit):
-                        acct.exhausted = True
-                        logger.info(
-                            "Account %s reached quota limit (%.1f/%d)",
-                            acct.username, acct.premium_used, acct.premium_limit,
-                        )
-                        self._purge_conv_entries_locked(acct)
-                    break
-        if username is not None:
-            if backend == "copilot":
-                update_account(username, premium_used=usage)
-            else:
-                update_anthropic_account_usage(username, usage)
+                    self._conv_cache[(conv_key, acct.backend)] = (acct, time.time())
+                    return
+
+    # ----- live utilization poller -----------------------------------------
+    async def refresh_usage_once(self) -> None:
+        """Refresh live utilization for anthropic/chatgpt accounts (best-effort)."""
+        targets = [a for a in self._accounts
+                   if a.backend in ("anthropic", "chatgpt")]
+        for acct in targets:
+            fn = getattr(acct.client, "fetch_usage", None)
+            if fn is None:
+                continue
+            try:
+                acct.utilization = await fn()
+            except Exception:
+                pass  # leave stale; never break rotation
+
+    async def _usage_poller(self) -> None:
+        while True:
+            await self.refresh_usage_once()
+            await asyncio.sleep(180)
+
+    def start_usage_poller(self) -> None:
+        """Start the background usage poller (idempotent). Call once after the
+        event loop is running (e.g. FastAPI startup)."""
+        if self._usage_task is None:
+            self._usage_task = asyncio.ensure_future(self._usage_poller())
 
     async def record_request_time(self, client: Any) -> None:
         async with self._lock:
@@ -449,10 +404,13 @@ class AccountManager:
                 and (target_backend is None or a.backend == target_backend)
             ]
             if not available and target_backend is not None:
-                # Cross-backend fallback.
+                # Cross-backend fallback. A failed ChatGPT account falls back to
+                # Copilot (both serve /responses), never Anthropic (messages-only).
+                exclude = {"anthropic"} if failed_backend == "chatgpt" else set()
                 available = [
                     a for a in self._accounts
                     if a.is_available() and a.client is not failed_client
+                    and a.backend not in exclude
                 ]
             if not available:
                 return None
@@ -491,23 +449,30 @@ class AccountManager:
                                   prefer_backend: str | None) -> AccountInfo:
         """Apply the configured rotation strategy. Must be called with lock held."""
         if prefer_backend is not None:
-            pool = [a for a in self._accounts if a.backend == prefer_backend]
-            available = [a for a in pool if a.is_available()]
+            available = [a for a in self._accounts
+                         if a.backend == prefer_backend and a.is_available()]
         else:
-            pool = self._accounts
-            available = [a for a in pool if a.is_available()]
+            # ChatGPT is Responses-only — never pick it for the generic pool
+            # (chat/completions, native messages). It's reachable only via an
+            # explicit prefer_backend="chatgpt".
+            available = [a for a in self._accounts
+                         if a.backend != "chatgpt" and a.is_available()]
 
         if not available and prefer_backend is not None:
-            # Fall back to the full pool.
-            available = [a for a in self._accounts if a.is_available()]
+            # Fall back to the full pool (excluding chatgpt for the same reason).
+            available = [a for a in self._accounts
+                         if a.backend != "chatgpt" and a.is_available()]
 
         if not available:
             raise RuntimeError(
-                "All accounts are unavailable (quota exhausted or rate-limited)."
+                "All accounts are unavailable (rate-limited or quota-exhausted upstream)."
             )
 
-        if self._strategy == "round-robin":
-            # RR over the full _accounts list, skipping those filtered out.
+        return self._pick_from(available)
+
+    def _pick_from(self, available: list[AccountInfo]) -> AccountInfo:
+        """Apply the rotation strategy to a candidate list. Lock held."""
+        def _round_robin() -> AccountInfo:
             for _ in range(len(self._accounts)):
                 self._rr_index = (self._rr_index + 1) % len(self._accounts)
                 candidate = self._accounts[self._rr_index]
@@ -515,12 +480,56 @@ class AccountManager:
                     return candidate
             return available[0]
 
-        if self._strategy == "max-usage":
-            target = max(a.premium_used for a in available)
-            tied = [a for a in available if a.premium_used == target]
-            return random.choice(tied)
+        if self._strategy == "round-robin":
+            return _round_robin()
 
-        # min-usage
-        target = min(a.premium_used for a in available)
-        tied = [a for a in available if a.premium_used == target]
-        return random.choice(tied)
+        # least-utilized: prefer accounts with a live utilization signal
+        # (anthropic/chatgpt) and pick the lowest; accounts with no signal
+        # (copilot — credit-based, no per-account usage) round-robin.
+        with_util = [a for a in available if a.utilization is not None]
+        if with_util:
+            target = min(a.utilization for a in with_util)
+            tied = [a for a in with_util if a.utilization == target]
+            return random.choice(tied)
+        return _round_robin()
+
+    async def get_responses_client(
+        self,
+        initiator: str = "user",
+        *,
+        conv_key: str | None = None,
+        force_copilot: bool = False,
+    ) -> Any:
+        """Account selection for /v1/responses: conversation stickiness wins
+        over backend preference (a prior response id is account-specific),
+        otherwise prefer the ChatGPT pool and fall back to Copilot. ChatGPT is
+        only reachable through this path."""
+        async with self._lock:
+            self._sweep_conv_cache_locked()
+            if conv_key is not None:
+                for be in ("chatgpt", "copilot", "anthropic"):
+                    hit = self._conv_cache.get((conv_key, be))
+                    if hit is not None and hit[0].is_available():
+                        self._conv_cache[(conv_key, be)] = (hit[0], time.time())
+                        if initiator == "user":
+                            self._last_user_by_backend[hit[0].backend] = hit[0]
+                        return hit[0].client
+
+            acct = None
+            if not force_copilot:
+                cg = [a for a in self._accounts
+                      if a.backend == "chatgpt" and a.is_available()]
+                if cg:
+                    acct = self._pick_from(cg)
+            if acct is None:
+                cop = [a for a in self._accounts
+                       if a.backend == "copilot" and a.is_available()]
+                if cop:
+                    acct = self._pick_from(cop)
+            if acct is None:
+                raise RuntimeError(
+                    "No Copilot/ChatGPT accounts available for /v1/responses.")
+            self._last_user_by_backend[acct.backend] = acct
+            if conv_key is not None:
+                self._conv_cache[(conv_key, acct.backend)] = (acct, time.time())
+            return acct.client

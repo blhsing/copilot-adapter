@@ -108,6 +108,23 @@ def claude_login(plan: str, quota_limit: int | None):
         raise click.ClickException("Login aborted or failed.")
 
 
+@main.command("codex-login")
+def codex_login():
+    """Authenticate a ChatGPT (Codex) account via the device-code flow.
+
+    Opens auth.openai.com and prompts for a one-time code (no localhost
+    callback). The proxy prefers ChatGPT-pool accounts for /v1/responses
+    traffic, falling back to Copilot when the ChatGPT pool is exhausted.
+
+    Requires 'device code authorization' enabled in ChatGPT > Settings >
+    Security on the account being added.
+    """
+    from lib.openai_auth import codex_login_interactive
+    result = codex_login_interactive()
+    if result is None:
+        raise click.ClickException("Login aborted or failed.")
+
+
 @main.command("regenerate-ca")
 @click.option("--ca-dir", default=None, metavar="DIR",
               envvar="COPILOT_ADAPTER_CA_DIR",
@@ -332,9 +349,12 @@ def config(tool: str, revert: bool, host: str, port: int,
               metavar="N",
               help="Number of worker processes (default: 1).")
 @click.option("--strategy", default=None,
-              type=click.Choice(["max-usage", "min-usage", "round-robin"]),
+              type=click.Choice(["least-utilized", "round-robin",
+                                 "max-usage", "min-usage"]),
               envvar="COPILOT_ADAPTER_STRATEGY",
-              help="Account rotation strategy (default: max-usage).")
+              help="Account rotation strategy (default: least-utilized). "
+                   "least-utilized rotates by live backend usage; the legacy "
+                   "max-usage/min-usage map to least-utilized.")
 @click.option("--quota-limit", default=None, type=int,
               envvar="COPILOT_ADAPTER_QUOTA_LIMIT", metavar="N",
               help="Default monthly premium request limit per account (default: 300).")
@@ -443,6 +463,12 @@ def config(tool: str, revert: bool, host: str, port: int,
                    "the giveaway pool UA otherwise tells api.anthropic.com "
                    "this is not a real REPL session. Has no effect on Copilot "
                    "traffic.")
+@click.option("--copilot-only-client", "copilot_only_client", multiple=True,
+              metavar="RULE", envvar="COPILOT_ADAPTER_COPILOT_ONLY_CLIENTS",
+              help="Pin a client to the Copilot backend so it never consumes "
+                   "the Anthropic (/v1/messages) or ChatGPT (/v1/responses) "
+                   "pools. RULE is an IP literal, CIDR range, or reverse-DNS "
+                   "hostname glob (* and ?). Repeatable.")
 def serve(config_path: str | None, host: str | None, port: int | None,
           github_token: tuple[str, ...], cors_origin: tuple[str, ...],
           workers: int | None, strategy: str | None,
@@ -460,7 +486,8 @@ def serve(config_path: str | None, host: str | None, port: int | None,
           reverse_dns_server: str | None,
           reverse_dns_sync_wait_ms: int | None,
           forwarded_allow_ips: str | None,
-          spoof_interactive: bool):
+          spoof_interactive: bool,
+          copilot_only_client: tuple[str, ...]):
     """Start the OpenAI-compatible API server."""
     import uvicorn
 
@@ -627,8 +654,18 @@ def serve(config_path: str | None, host: str | None, port: int | None,
     except Exception as exc:
         print(f"  Warning: could not load Anthropic accounts: {exc}")
 
+    # ChatGPT (Codex) accounts from the device-flow cache.
+    chatgpt_accounts = []
+    try:
+        from lib.openai_auth import resolve_chatgpt_accounts
+        for a in resolve_chatgpt_accounts():
+            chatgpt_accounts.append({**a, "backend": "chatgpt"})
+            accounts.append({**a, "backend": "chatgpt"})
+    except Exception as exc:
+        print(f"  Warning: could not load ChatGPT accounts: {exc}")
+
     acct_mgr = AccountManager(
-        accounts, strategy=strategy, quota_limit=quota_limit, plan=plan,
+        accounts, strategy=strategy,
         rate_limit_backoff_seconds=rate_limit_backoff_minutes * 60,
     )
 
@@ -640,14 +677,12 @@ def serve(config_path: str | None, host: str | None, port: int | None,
 
     n = len(accounts)
     n_anthropic = len(anthropic_accounts)
-    n_copilot = n - n_anthropic
+    n_chatgpt = len(chatgpt_accounts)
+    n_copilot = n - n_anthropic - n_chatgpt
     print(f"\nConfigured {n} account(s) ({n_copilot} copilot, "
-          f"{n_anthropic} anthropic), strategy: {strategy}")
+          f"{n_anthropic} anthropic, {n_chatgpt} chatgpt), strategy: {strategy}")
     for acct in acct_mgr.accounts:
-        limit_str = str(acct.premium_limit) if acct.premium_limit is not None else "unset"
-        backend_tag = f"[{acct.backend}]"
-        print(f"  - {acct.username} {backend_tag} (plan: {acct.plan}, "
-              f"usage: {acct.premium_used}/{limit_str})")
+        print(f"  - {acct.username} [{acct.backend}]")
     if spoof_interactive:
         print("\n** Spoof interactive headers: Anthropic-pool requests will "
               "carry the REPL's User-Agent / x-app / extended anthropic-beta **")
@@ -666,6 +701,13 @@ def serve(config_path: str | None, host: str | None, port: int | None,
     from uvicorn.config import LOGGING_CONFIG
     logging_config = build_runtime_logging_config(LOGGING_CONFIG, log_level, log_file, reverse_dns_server, reverse_dns_sync_wait_ms)
 
+    # Copilot-only allowlist applies to both launch paths via the env (the
+    # lifespan reads it for single-process init_app too).
+    if copilot_only_client:
+        os.environ["_COPILOT_ADAPTER_COPILOT_ONLY_CLIENTS"] = ",".join(copilot_only_client)
+        print(f"\n** Copilot-only clients: {len(copilot_only_client)} rule(s) "
+              "pinned to Copilot (skip Anthropic/ChatGPT pools) **")
+
     if proxy_mode and workers > 1:
         print("Warning: --proxy mode is not compatible with multiple workers, using 1 worker")
         workers = 1
@@ -673,11 +715,14 @@ def serve(config_path: str | None, host: str | None, port: int | None,
     if workers > 1:
         # Workers initialize via the lifespan event using env vars
         # Format: "token1:username1:plan1:quota1:usage1,..."
+        # Only Copilot tokens go through the env; Anthropic/ChatGPT accounts are
+        # reloaded from their on-disk caches in the worker lifespan (they carry
+        # refresh tokens we don't serialize through the environment).
         parts = []
         for acct in accounts:
-            limit_str = str(acct["quota_limit"]) if acct["quota_limit"] is not None else ""
-            used_str = str(acct["premium_used"]) if acct["premium_used"] else ""
-            parts.append(f"{acct['token']}:{acct['username']}:{acct['plan']}:{limit_str}:{used_str}")
+            if acct.get("backend", "copilot") != "copilot":
+                continue
+            parts.append(f"{acct['token']}:{acct['username']}")
         os.environ["_COPILOT_ADAPTER_GITHUB_TOKENS"] = ",".join(parts)
         os.environ["_COPILOT_ADAPTER_STRATEGY"] = strategy
         if quota_limit is not None:

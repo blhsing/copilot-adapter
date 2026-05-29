@@ -114,31 +114,18 @@ python copilot_adapter.py logout --all
 
 **Rotation strategies** (`--strategy`):
 
-| Strategy | Behavior | Pros | Cons |
-|----------|----------|------|------|
-| `max-usage` (default) | Concentrate all usage on one account until its quota is exhausted, then move to the next | Maximizes the number of accounts kept at zero usage as reserves; best server-side cache efficiency since all requests hit the same account's session; simple and predictable | One account bears all the load; if the month resets mid-use, the reserve accounts were never needed |
-| `min-usage` | Always pick the account with the lowest usage | Spreads consumption evenly across all accounts; maximizes headroom on every account; reduces risk of hitting per-account rate limits | All accounts accumulate usage simultaneously, so none are kept clean as a reserve |
-| `round-robin` | Rotate blindly on each user-initiated request | Simple and predictable; spreads load without needing usage data | No awareness of quota — won't avoid accounts nearing their limit |
+| Strategy | Behavior | Notes |
+|----------|----------|-------|
+| `least-utilized` (default) | Pick the account with the lowest **live** utilization, fetched from the backend's usage endpoint | Spreads load by real remaining quota. Anthropic (`/api/oauth/usage`) and ChatGPT (`/backend-api/wham/usage`) report utilization; Copilot has no per-account signal (credit-based pricing) so Copilot accounts round-robin |
+| `round-robin` | Rotate blindly on each user-initiated request | Simple; ignores usage |
 
-Agent-initiated requests (tool-use follow-ups) always stay on the same account as the preceding user request to avoid unnecessary premium request charges.
+The legacy `max-usage` / `min-usage` strategies were removed (Copilot's move to credit-based pricing made the per-request quota counter meaningless) and now map to `least-utilized`.
 
-**Quota exhaustion detection**: When a Copilot account's premium request quota is exhausted, GitHub silently downgrades the response to a free fallback model (e.g. GPT-4.1) instead of returning an error. The server detects this by comparing the model in the response against the model that was requested — if they don't match, it marks the account as exhausted and automatically retries the request with the next available account. This works for both streaming and non-streaming requests.
+Agent-initiated requests (tool-use follow-ups) always stay on the same account as the preceding user request. A background poller (~3 min) refreshes live utilization for Anthropic/ChatGPT accounts.
 
-**Rate-limit back-off**: When an account returns 429 (rate limited), it is sidelined temporarily and rotation skips it. The default back-off is 60 minutes (configurable via `--rate-limit-backoff-minutes`), after which the account becomes eligible again automatically — distinct from the permanent quota-exhaustion mark above, which only clears on container restart or a manual usage reset.
+**Quota exhaustion detection**: When a Copilot account's quota is exhausted, GitHub silently downgrades the response to a free fallback model (e.g. GPT-4.1) instead of erroring. The server compares the response model against the requested model — on a mismatch it sidelines the account and retries with the next available one (streaming + non-streaming).
 
-For proactive switching *before* hitting the limit, set `--quota-limit N` or let it default from the plan. Usage is tracked in-memory with plan-aware model cost multipliers (e.g. Claude Opus 4.7 costs 3x, GPT-4o costs 0x on paid plans). You can specify each account's current usage via the `TOKEN:PLAN:QUOTA:USAGE` format, `--usage` flag, or config file to start tracking from where you left off. These defaults can be overridden per account — see [Per-account plan and quota](#per-account-plan-and-quota).
-
-**Supported plans** (`--plan`):
-
-| Plan | Monthly premium requests | Model multipliers |
-|------|------------------------:|-------------------|
-| `free` | 50 | All models cost 1x |
-| `pro` (default) | 300 | Differentiated (e.g. GPT-4o: 0x, Claude Opus: 3x) |
-| `pro+` | 1500 | Same as `pro` |
-| `business` | 300 | Same as `pro` |
-| `enterprise` | 1000 | Same as `pro` |
-
-When `--quota-limit` is not specified, it defaults to the plan's monthly allowance.
+**Rate-limit back-off**: A 429 (or the model-mismatch sideline above) makes an account unavailable for `--rate-limit-backoff-minutes` (default 60), after which it's eligible again automatically. Anthropic 429s use the precise `anthropic-ratelimit-*-reset` hint instead.
 
 ### Claude Max subscription pooling
 
@@ -160,6 +147,28 @@ Routing rules (handled automatically — no config needed):
 - **`/v1/messages/count_tokens`** routes to a real Anthropic account when available (returning upstream-counted tokens), with a length-based heuristic as the offline fallback so a Copilot-only deployment still works.
 
 The Anthropic backend handles 429s precisely: it parses `anthropic-ratelimit-unified-reset`, `anthropic-ratelimit-requests-reset`, and `retry-after` to set an account's `unavailable_until` exactly when the upstream says it'll be back, instead of using the generic `--rate-limit-backoff-minutes` value.
+
+### ChatGPT (Codex) subscription pooling
+
+The proxy can also pool ChatGPT Plus/Pro/Business subscriptions and use them as a first-choice backend for `/v1/responses` (the Codex endpoint), falling back to Copilot. Authenticate via the OpenAI device-code flow (the same one `codex login --device-auth` uses):
+
+```bash
+python copilot_adapter.py codex-login
+# Opens auth.openai.com and prints a one-time code. Sign in, enter the code.
+# Requires "device code authorization" enabled in ChatGPT > Settings > Security.
+```
+
+Each `codex-login` adds an account to `~/.config/copilot-adapter/chatgpt_tokens.json` (access + refresh token + `chatgpt-account-id` decoded from the id_token JWT; refresh tokens rotate and are persisted). Routing:
+
+- **`/v1/responses`** prefers a ChatGPT-pool account (`chatgpt.com/backend-api/codex/responses`), falling back to Copilot when none is available. A default `instructions` field is injected when missing (the Codex backend requires it).
+- **Conversation stickiness** pins multi-turn Codex sessions to one account via `previous_response_id` (the response id is account-specific — replaying it on another account 401s).
+- **Forward-proxy mode** intercepts `chatgpt.com` and rewrites `POST /backend-api/codex/responses` → `/v1/responses`, so an unmodified Codex CLI pointed at the proxy gets pooled.
+
+ChatGPT is a Responses-only backend — it's never used for chat/completions, embeddings, or model listing.
+
+#### Pinning clients to Copilot
+
+`--copilot-only-client RULE` (repeatable; IP literal, CIDR, or reverse-DNS hostname glob) pins matching clients to the Copilot backend so they never consume the Anthropic (`/v1/messages`) or ChatGPT (`/v1/responses`) pools.
 
 #### Spoof interactive Claude Code headers
 

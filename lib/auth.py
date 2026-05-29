@@ -266,7 +266,8 @@ def add_account(token: str, *, plan: str | None = None,
     Rejects PATs (ghp_) up-front since the Copilot API returns 404 for them.
     Returns a dict with username/plan/quota_limit/premium_used on success, None if invalid.
     """
-    from .account_manager import PLAN_QUOTAS
+    # plan/quota are retained as informational fields only — the quota model was
+    # removed (Copilot credit pricing); rotation uses live utilization now.
 
     if token.startswith("ghp_"):
         print(
@@ -282,7 +283,7 @@ def add_account(token: str, *, plan: str | None = None,
 
     plan = plan or "pro"
     if quota_limit is None:
-        quota_limit = PLAN_QUOTAS.get(plan, 300)
+        quota_limit = 300
     if premium_used is None:
         premium_used = 0
 

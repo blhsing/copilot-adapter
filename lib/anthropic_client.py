@@ -149,3 +149,36 @@ class AnthropicClient:
                 headers=await self._headers("user"),
                 content=_encode(body),
             )
+
+    async def fetch_usage(self) -> float | None:
+        """Return live utilization 0..1 (the binding window), or None on error.
+
+        GET /api/oauth/usage -> { five_hour: {utilization, ...}, seven_day:
+        {...}, seven_day_opus, seven_day_sonnet, ... }. Anthropic reports
+        utilization as a percentage (e.g. 7.0 = 7%); normalize to 0..1.
+        """
+        try:
+            token = await self._token_manager.get_token()
+            async with httpx.AsyncClient(timeout=30) as client:
+                r = await client.get(
+                    f"{ANTHROPIC_API}/api/oauth/usage",
+                    headers={
+                        "authorization": f"Bearer {token}",
+                        "anthropic-version": "2023-06-01",
+                        "anthropic-beta": "oauth-2025-04-20",
+                        "user-agent": _POOL_USER_AGENT,
+                    },
+                )
+            if r.status_code != 200:
+                return None
+            data = r.json() or {}
+            pcts = []
+            for key in ("five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet"):
+                win = data.get(key)
+                if isinstance(win, dict) and win.get("utilization") is not None:
+                    pcts.append(float(win["utilization"]))
+            if not pcts:
+                return None
+            return max(pcts) / 100.0
+        except Exception:
+            return None

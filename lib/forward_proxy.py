@@ -31,6 +31,7 @@ _INTERCEPT_HOSTS = {
     "api.openai.com",
     "api.anthropic.com",
     "generativelanguage.googleapis.com",
+    "chatgpt.com",
 }
 _BUF = 65536
 
@@ -375,6 +376,24 @@ def _is_api_path(request_line: bytes) -> bool:
                for p in _API_PATH_PREFIXES)
 
 
+def _maybe_rewrite_codex_path(host: str, request_line: bytes) -> bytes:
+    """ChatGPT's Codex endpoint isn't a path the adapter serves; rewrite
+    ``POST /backend-api/codex/responses`` (chatgpt.com) to ``/v1/responses``
+    so the internal dispatcher handles it (and re-pools it back out to
+    chatgpt.com under our own ChatGPT credentials)."""
+    if host != "chatgpt.com":
+        return request_line
+    parts = request_line.split(b" ")
+    if len(parts) < 3:
+        return request_line
+    path = parts[1].split(b"?")[0]
+    if path == b"/backend-api/codex/responses" or path.startswith(
+            b"/backend-api/codex/responses/"):
+        parts[1] = b"/v1/responses"
+        return b" ".join(parts)
+    return request_line
+
+
 async def _handle_rewrite_mitm(client_reader: asyncio.StreamReader,
                                client_writer: asyncio.StreamWriter,
                                original_host: str,
@@ -398,6 +417,8 @@ async def _handle_rewrite_mitm(client_reader: asyncio.StreamReader,
 
             headers = await _read_headers(client_reader)
             body = await _read_body(client_reader, headers)
+
+            request_line = _maybe_rewrite_codex_path(original_host, request_line)
 
             if _is_api_path(request_line):
                 # Route to internal Uvicorn (reroute to Copilot)
