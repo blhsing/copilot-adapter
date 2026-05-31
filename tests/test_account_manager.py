@@ -1,28 +1,23 @@
-import time
-
-import pytest
-import pytest_asyncio
-pytestmark = pytest.mark.asyncio
-
 """Unit tests for AccountManager rotation strategies."""
 
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from lib.account_manager import AccountInfo, AccountManager
 
+pytestmark = pytest.mark.asyncio
 
-def _make_manager(n: int = 3, strategy: str = "round-robin", quota_limit=None,
-                   plan="pro"):
+
+def _make_manager(n: int = 3, strategy: str = "round-robin"):
     """Create an AccountManager with *n* mock accounts."""
     accounts = [(f"token_{i}", f"user_{i}") for i in range(n)]
     with patch("lib.account_manager.CopilotTokenManager") as MockTM, \
          patch("lib.account_manager.CopilotClient") as MockClient:
         MockTM.side_effect = lambda t: MagicMock(github_token=t)
         MockClient.side_effect = lambda tm: MagicMock(name=f"client_{tm.github_token}")
-        mgr = AccountManager(accounts, strategy=strategy, quota_limit=quota_limit,
-                             plan=plan)
+        mgr = AccountManager(accounts, strategy=strategy)
     return mgr
 
 
@@ -44,9 +39,9 @@ class TestRoundRobin:
         assert clients[2] is clients[5]
         assert clients[0] is not clients[1]
 
-    async def test_skips_exhausted(self):
+    async def test_skips_unavailable(self):
         mgr = _make_manager(3, "round-robin")
-        mgr._accounts[1].exhausted = True
+        mgr._accounts[1].unavailable_until = time.time() + 60
         clients = [await mgr.get_client("user") for _ in range(4)]
         usernames = [
             a.username for a in mgr._accounts
@@ -54,50 +49,41 @@ class TestRoundRobin:
         ]
         assert "user_1" not in usernames
 
-    async def test_all_exhausted_raises(self):
+    async def test_all_unavailable_raises(self):
         mgr = _make_manager(2, "round-robin")
         for a in mgr._accounts:
-            a.exhausted = True
+            a.unavailable_until = time.time() + 60
         with pytest.raises(RuntimeError, match="unavailable"):
             await mgr.get_client("user")
 
 
-class TestMaxUsage:
-    async def test_picks_highest_used(self):
-        mgr = _make_manager(3, "max-usage")
-        mgr._accounts[0].premium_used = 10
-        mgr._accounts[1].premium_used = 50
-        mgr._accounts[2].premium_used = 30
+class TestLeastUtilized:
+    async def test_picks_lowest_live_utilization(self):
+        mgr = _make_manager(3, "least-utilized")
+        mgr._accounts[0].utilization = 0.6
+        mgr._accounts[1].utilization = 0.2
+        mgr._accounts[2].utilization = 0.4
         client = await mgr.get_client("user")
         assert client is mgr._accounts[1].client
 
-    async def test_skips_exhausted(self):
-        mgr = _make_manager(3, "max-usage")
-        mgr._accounts[0].premium_used = 10
-        mgr._accounts[1].premium_used = 50
-        mgr._accounts[1].exhausted = True
-        mgr._accounts[2].premium_used = 30
+    async def test_skips_unavailable(self):
+        mgr = _make_manager(3, "least-utilized")
+        mgr._accounts[0].utilization = 0.1
+        mgr._accounts[0].unavailable_until = time.time() + 60
+        mgr._accounts[1].utilization = 0.5
+        mgr._accounts[2].utilization = 0.3
         client = await mgr.get_client("user")
         assert client is mgr._accounts[2].client
 
+    async def test_legacy_strategies_map_to_least_utilized(self):
+        assert _make_manager(1, "max-usage").strategy == "least-utilized"
+        assert _make_manager(1, "min-usage").strategy == "least-utilized"
 
-class TestMinUsage:
-    async def test_picks_lowest_used(self):
-        mgr = _make_manager(3, "min-usage")
-        mgr._accounts[0].premium_used = 10
-        mgr._accounts[1].premium_used = 50
-        mgr._accounts[2].premium_used = 30
-        client = await mgr.get_client("user")
-        assert client is mgr._accounts[0].client
-
-    async def test_skips_exhausted(self):
-        mgr = _make_manager(3, "min-usage")
-        mgr._accounts[0].premium_used = 10
-        mgr._accounts[0].exhausted = True
-        mgr._accounts[1].premium_used = 50
-        mgr._accounts[2].premium_used = 30
-        client = await mgr.get_client("user")
-        assert client is mgr._accounts[2].client
+    async def test_no_utilization_signal_round_robins(self):
+        mgr = _make_manager(3, "least-utilized")
+        clients = [await mgr.get_client("user") for _ in range(4)]
+        assert clients[0] is clients[3]
+        assert clients[0] is not clients[1]
 
 
 class TestAgentStickiness:
@@ -128,9 +114,9 @@ class TestSingleAccount:
         clients = [await mgr.get_client("user") for _ in range(3)]
         assert all(c is clients[0] for c in clients)
 
-    async def test_single_account_exhausted_raises(self):
+    async def test_single_account_unavailable_raises(self):
         mgr = _make_manager(1, "round-robin")
-        mgr._accounts[0].exhausted = True
+        mgr._accounts[0].unavailable_until = time.time() + 60
         with pytest.raises(RuntimeError, match="unavailable"):
             await mgr.get_client("user")
 
@@ -142,7 +128,6 @@ class TestExhaustionDetection:
         await mgr.mark_exhausted(target.client)
         assert target.is_available() is False
         assert target.unavailable_until is not None
-        assert target.exhausted is False  # not a permanent quota cap
 
     async def test_get_fallback_client(self):
         mgr = _make_manager(3, "round-robin")
@@ -153,9 +138,9 @@ class TestExhaustionDetection:
         assert mgr._accounts[0].is_available() is False
         assert mgr._accounts[0].unavailable_until is not None
 
-    async def test_get_fallback_returns_none_when_all_exhausted(self):
+    async def test_get_fallback_returns_none_when_all_unavailable(self):
         mgr = _make_manager(2, "round-robin")
-        mgr._accounts[1].exhausted = True
+        mgr._accounts[1].unavailable_until = time.time() + 60
         result = await mgr.get_fallback_client(mgr._accounts[0].client)
         assert result is None
 
@@ -193,72 +178,17 @@ class TestExhaustionDetection:
             assert client is mgr._accounts[1].client
 
 
-class TestQuotaLimit:
-    async def test_quota_limit_applied_to_all_accounts(self):
-        mgr = _make_manager(3, "round-robin", quota_limit=100)
-        for a in mgr._accounts:
-            assert a.premium_limit == 100
-
-    async def test_quota_limit_defaults_from_plan(self):
-        mgr = _make_manager(3, "round-robin")  # default plan is "pro"
-        for a in mgr._accounts:
-            assert a.premium_limit == 300  # pro plan default
-
-
 class TestUsageTracking:
-    async def test_record_usage_increments_with_multiplier(self):
-        mgr = _make_manager(2, "max-usage")
-        client = await mgr.get_client("user")
-        await mgr.record_usage(client, "claude-opus-4.6")  # 3x
-        assert _acct_for_client(mgr, client).premium_used == 3.0
-
-    async def test_record_usage_zero_multiplier_model(self):
-        mgr = _make_manager(2, "max-usage")
-        client = await mgr.get_client("user")
-        await mgr.record_usage(client, "gpt-4o")  # 0x
-        assert _acct_for_client(mgr, client).premium_used == 0
-
-    async def test_record_usage_fractional_multiplier(self):
-        mgr = _make_manager(2, "max-usage")
-        client = await mgr.get_client("user")
-        await mgr.record_usage(client, "claude-haiku-4.5")  # 0.33x
-        assert _acct_for_client(mgr, client).premium_used == pytest.approx(0.33)
-
-    async def test_record_usage_unknown_model_defaults_to_1(self):
-        mgr = _make_manager(2, "max-usage")
-        client = await mgr.get_client("user")
-        await mgr.record_usage(client, "some-future-model")
-        assert _acct_for_client(mgr, client).premium_used == 1.0
-
-    async def test_record_usage_prefix_match(self):
-        mgr = _make_manager(2, "max-usage")
-        client = await mgr.get_client("user")
-        await mgr.record_usage(client, "gpt-4o-2024-07-18")  # matches gpt-4o → 0x
-        assert _acct_for_client(mgr, client).premium_used == 0
-
-    async def test_exhausts_at_quota_limit(self):
-        mgr = _make_manager(2, "max-usage", quota_limit=5)
+    async def test_record_usage_is_noop_for_removed_local_quota_model(self):
+        mgr = _make_manager(2, "least-utilized")
         client = await mgr.get_client("user")
         acct = _acct_for_client(mgr, client)
-        await mgr.record_usage(client, "claude-opus-4.6")  # 3x → 3
-        client = await mgr.get_client("user")  # still same account (3 < 5)
-        await mgr.record_usage(client, "claude-opus-4.6")  # 3x → 6 ≥ 5 → exhausted
-        assert acct.exhausted is True
-        # Next user request should go to the other account
-        client2 = await mgr.get_client("user")
-        assert client2 is not client
 
-    async def test_free_plan_all_models_cost_1(self):
-        mgr = _make_manager(2, "max-usage", plan="free")
-        client = await mgr.get_client("user")
-        await mgr.record_usage(client, "gpt-4o")  # 0x on paid, 1x on free
-        assert _acct_for_client(mgr, client).premium_used == 1.0
+        await mgr.record_usage(client, "claude-opus-4.6")
 
-    async def test_paid_plan_included_models_cost_0(self):
-        mgr = _make_manager(2, "max-usage", plan="pro")
-        client = await mgr.get_client("user")
-        await mgr.record_usage(client, "gpt-4o")  # 0x on paid
-        assert _acct_for_client(mgr, client).premium_used == 0
+        assert acct.is_available() is True
+        assert not hasattr(acct, "premium_used")
+        assert not hasattr(acct, "premium_limit")
 
 
 class TestValidation:

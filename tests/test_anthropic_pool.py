@@ -136,10 +136,10 @@ class TestPerBackendSelection:
     @pytest.mark.asyncio
     async def test_prefer_anthropic_falls_back_to_copilot(self):
         mgr = _make_dual_backend_manager()
-        # Mark the Anthropic account exhausted.
+        # Sideline the Anthropic account.
         for a in mgr.accounts:
             if a.backend == "anthropic":
-                a.exhausted = True
+                a.unavailable_until = time.time() + 60
         client = await mgr.get_client(initiator="user", prefer_backend="anthropic")
         assert mgr.get_backend(client) == "copilot"
 
@@ -150,7 +150,7 @@ class TestPerBackendSelection:
         assert mgr.has_available("anthropic")
         for a in mgr.accounts:
             if a.backend == "anthropic":
-                a.exhausted = True
+                a.unavailable_until = time.time() + 60
         assert mgr.has_available("copilot")
         assert not mgr.has_available("anthropic")
 
@@ -213,7 +213,8 @@ class TestConvKeyStickiness:
         acct, _ = mgr._conv_cache[key]
         mgr._conv_cache[key] = (acct, time.time() - CONV_STICKY_TTL_SECONDS - 60)
         # Next call should re-pin from scratch (may pick same or different).
-        await mgr.get_client(initiator="user", conv_key="ttl-key")
+        second = await mgr.get_client(initiator="user", conv_key="ttl-key")
         # Whatever account is now in the cache should have a fresh timestamp.
+        key = ("ttl-key", mgr.get_backend(second))
         _, ts = mgr._conv_cache[key]
         assert ts > time.time() - 5
