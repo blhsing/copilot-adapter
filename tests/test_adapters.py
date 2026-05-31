@@ -590,6 +590,19 @@ class TestAnthropicAdapter:
         # original body untouched
         assert "format" in body["output_config"]
 
+    def test_sanitize_native_anthropic_body_converts_legacy_opus_thinking(self):
+        body = {
+            "model": "claude-opus-4-7-20260215",
+            "messages": [{"role": "user", "content": "hi"}],
+            "thinking": {"type": "enabled", "budget_tokens": 32000},
+        }
+
+        sanitized = _sanitize_native_anthropic_body(body)
+
+        assert sanitized["thinking"] == {"type": "adaptive"}
+        assert sanitized["output_config"] == {"effort": "medium"}
+        assert body["thinking"] == {"type": "enabled", "budget_tokens": 32000}
+
     def test_sanitize_native_anthropic_body_drops_empty_output_config(self):
         # If output_config only had format, dropping it should leave the key out.
         body = {

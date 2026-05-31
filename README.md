@@ -658,6 +658,8 @@ Examples:
 - `claude-opus-4.7`: Copilot only accepts `medium`; any other effort (`low`, `high`, `max`, `xhigh`) is clamped to `medium`.
 - Other Anthropic models: `max` and `xhigh` are clamped to `high` (the highest level Copilot accepts).
 
+For native Copilot `/v1/messages` calls, older Anthropic clients that still send `thinking.type: enabled` for `claude-opus-4.7` are translated to Copilot's accepted `thinking.type: adaptive` shape and paired with `output_config.effort` before the clamping above is applied.
+
 This normalization is based on the final mapped model, so it works even when model mapping redirects requests across providers.
 
 ## Available models

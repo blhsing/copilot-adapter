@@ -35,9 +35,13 @@ async def token_manager(github_token: str) -> CopilotTokenManager:
     await tm.get_token()
     return tm
 
-@pytest.fixture(scope="session")
-def client(token_manager: CopilotTokenManager) -> CopilotClient:
-    return CopilotClient(token_manager)
+@pytest_asyncio.fixture(scope="session")
+async def client(token_manager: CopilotTokenManager) -> CopilotClient:
+    c = CopilotClient(token_manager)
+    try:
+        yield c
+    finally:
+        await c.aclose()
 
 
 # ---------------------------------------------------------------------------

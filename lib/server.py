@@ -1152,6 +1152,23 @@ def _sanitize_native_anthropic_body(body: dict) -> dict:
     sanitized.pop("context_management", None)
     if "messages" in sanitized:
         sanitized["messages"] = _strip_empty_text_blocks(sanitized["messages"])
+    # Copilot's opus-4.7 backend rejects the legacy `thinking.type=enabled`
+    # form and requires `thinking.type=adaptive` paired with
+    # `output_config.effort`. Convert here so older clients (Claude Code,
+    # which still sends `enabled` + `budget_tokens`) keep working.
+    thinking = sanitized.get("thinking")
+    model = sanitized.get("model", "")
+    if (
+        isinstance(thinking, dict)
+        and thinking.get("type") == "enabled"
+        and ("opus-4.7" in model or "opus-4-7" in model)
+    ):
+        sanitized["thinking"] = {"type": "adaptive"}
+        oc_existing = sanitized.get("output_config")
+        oc_new = dict(oc_existing) if isinstance(oc_existing, dict) else {}
+        if "effort" not in oc_new:
+            oc_new["effort"] = _normalize_thinking_to_effort(thinking) or "medium"
+        sanitized["output_config"] = oc_new
     # Copilot limits supported effort levels per model.
     oc = sanitized.get("output_config")
     if isinstance(oc, dict):
