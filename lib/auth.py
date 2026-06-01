@@ -62,7 +62,12 @@ def get_cached_account_meta() -> dict[str, dict]:
     return meta
 
 
-def resolve_github_tokens(explicit_tokens: list[str] | None = None) -> list[tuple[str, str]]:
+def resolve_github_tokens(
+    explicit_tokens: list[str] | None = None,
+    *,
+    interactive: bool = True,
+    required: bool = True,
+) -> list[tuple[str, str]]:
     """Return a list of (token, username) tuples from all available sources.
 
     Lookup order: *explicit_tokens* arg (from ``--github-token`` flags or
@@ -70,6 +75,12 @@ def resolve_github_tokens(explicit_tokens: list[str] | None = None) -> list[tupl
     cached token file > interactive device-flow OAuth.
 
     Each token is validated. Duplicates (by token value) are removed.
+
+    When *interactive* is False, the device-flow fallback is skipped — useful
+    for ``serve`` running headless (e.g. in a container), where blocking on a
+    browser prompt would crash-loop. When *required* is False, an empty result
+    is returned instead of raising, so the proxy can run on other backends
+    (Anthropic / ChatGPT) with no Copilot account at all.
     """
     import os
 
@@ -118,14 +129,14 @@ def resolve_github_tokens(explicit_tokens: list[str] | None = None) -> list[tupl
         for acct in cached:
             _add_token(acct["github_token"])
 
-    # 4. Interactive device flow
-    if not result:
+    # 4. Interactive device flow (skipped when running headless)
+    if not result and interactive:
         token = device_flow_login()
         username = _validate_github_token(token)
         if username:
             result.append((token, username))
 
-    if not result:
+    if not result and required:
         raise RuntimeError("No valid GitHub tokens found.")
 
     return result

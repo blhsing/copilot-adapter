@@ -627,7 +627,11 @@ def serve(config_path: str | None, host: str | None, port: int | None,
         explicit_tokens = [s["token"] for s in account_overrides.values()]
 
     print("Resolving accounts...")
-    resolved = resolve_github_tokens(explicit_tokens)
+    # serve runs headless: never block on interactive device flow, and allow
+    # zero Copilot accounts so the proxy can run on Anthropic / ChatGPT alone.
+    resolved = resolve_github_tokens(
+        explicit_tokens, interactive=False, required=False
+    )
 
     # Build rich account dicts with per-account plan/quota/usage
     accounts: list[dict] = []
