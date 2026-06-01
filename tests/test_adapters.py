@@ -27,12 +27,32 @@ from lib.server import (
     _extract_tool_calls_from_stream,
     _is_model_match,
     _message_debug_outline,
+    _model_for_log,
     _normalize_request_params,
+    _reasoning_for_log,
     _sanitize_native_anthropic_body,
     _should_use_native_anthropic_api,
     _should_use_responses_api,
     _supports_native_openai_web_search,
 )
+
+
+def test_model_log_value_shows_mapping_only_when_changed():
+    assert _model_for_log("gpt-5.5", "gpt-5.5") == "gpt-5.5"
+    assert _model_for_log("claude-opus-4-7", "claude-opus-4.7") == (
+        "claude-opus-4-7 -> claude-opus-4.7"
+    )
+
+
+def test_reasoning_log_value_shows_mapping_only_when_changed():
+    assert _reasoning_for_log(
+        {"reasoning": {"effort": "xhigh"}},
+        {"reasoning": {"effort": "xhigh"}},
+    ) == "xhigh"
+    assert _reasoning_for_log(
+        {"output_config": {"effort": "max"}},
+        {"reasoning_effort": "xhigh"},
+    ) == "max -> xhigh"
 
 
 # ===================================================================

@@ -236,6 +236,20 @@ def _reasoning_level_for_log(body: dict) -> str:
     return "default"
 
 
+def _model_for_log(requested_model: str, mapped_model: str) -> str:
+    if requested_model and mapped_model and requested_model != mapped_model:
+        return f"{requested_model} -> {mapped_model}"
+    return mapped_model or requested_model or "unknown"
+
+
+def _reasoning_for_log(requested_body: dict, mapped_body: dict) -> str:
+    requested = _reasoning_level_for_log(requested_body)
+    mapped = _reasoning_level_for_log(mapped_body)
+    if requested != mapped:
+        return f"{requested} -> {mapped}"
+    return mapped
+
+
 def _normalize_reasoning_params(
     openai_body: dict, source_provider: str, target_model: str, *, endpoint: str = "chat_completions"
 ) -> None:
@@ -1313,18 +1327,11 @@ async def handle_chat_completion(
     adapter: FormatAdapter, body: dict, *, request: Request | None = None, initiator: str | None = None
 ):
     resolved = initiator or adapter.infer_initiator(body)
+    source_body = dict(body)
     openai_body = adapter.convert_chat_request(body)
     source_provider = type(adapter).__name__.removesuffix("Adapter").lower()
-    openai_body["model"] = _apply_model_map(openai_body.get("model", ""))
-    logger.debug(
-        "Request reasoning inputs: source=%s requested_model=%s mapped_model=%s thinking=%s output_config=%s converted_thinking=%s",
-        source_provider,
-        body.get("model", ""),
-        openai_body.get("model", ""),
-        body.get("thinking"),
-        body.get("output_config"),
-        openai_body.get("_copilot_adapter_thinking"),
-    )
+    original_model = openai_body.get("model", "")
+    openai_body["model"] = _apply_model_map(original_model)
     requested_model = openai_body.get("model", "")
     openai_body = _normalize_request_params(
         openai_body, source_provider, requested_model, endpoint="chat_completions"
@@ -1336,8 +1343,10 @@ async def handle_chat_completion(
     account = account_mgr.get_username(client)
 
     logger.info(
-        "Chat completion requested by %s (model: %s, reasoning: %s, account: %s)",
-        resolved, requested_model, _reasoning_level_for_log(openai_body),
+        "Chat completion requested by %s (provider: %s, model: %s, reasoning: %s, account: %s)",
+        resolved, _infer_provider_from_model(requested_model),
+        _model_for_log(original_model, requested_model),
+        _reasoning_for_log(source_body, openai_body),
         account,
     )
 
@@ -1634,10 +1643,12 @@ async def handle_native_anthropic_messages(
 
     account = account_mgr.get_username(client)
     backend = account_mgr.get_backend(client)
+    upstream_model = upstream_body.get("model", requested_model)
     logger.info(
-        "Anthropic native messages requested by %s (model: %s, reasoning: %s, account: %s[%s])",
-        resolved, requested_model, _reasoning_level_for_log(upstream_body),
-        account, backend,
+        "Anthropic native messages requested by %s (provider: %s, model: %s, reasoning: %s, account: %s)",
+        resolved, backend, _model_for_log(requested_model, upstream_model),
+        _reasoning_for_log(body, upstream_body),
+        account,
     )
 
     if upstream_body.get("stream"):
@@ -1825,7 +1836,8 @@ async def handle_anthropic_via_responses(
             and not _force_ddg_web_search
         ),
     )
-    resp_body["model"] = _apply_model_map(resp_body.get("model", ""))
+    original_model = resp_body.get("model", "")
+    resp_body["model"] = _apply_model_map(original_model)
     requested_model = resp_body.get("model", "")
 
     resp_body = _normalize_request_params(
@@ -1838,8 +1850,10 @@ async def handle_anthropic_via_responses(
     account = account_mgr.get_username(client)
 
     logger.info(
-        "Anthropic→Responses requested by %s (model: %s, reasoning: %s, account: %s)",
-        resolved, requested_model, _reasoning_level_for_log(resp_body), account,
+        "Anthropic→Responses requested by %s (provider: %s, model: %s, reasoning: %s, account: %s)",
+        resolved, _infer_provider_from_model(requested_model),
+        _model_for_log(original_model, requested_model),
+        _reasoning_for_log(body, resp_body), account,
     )
 
     is_stream = body.get("stream")
@@ -2234,18 +2248,10 @@ async def chat_completions(request: Request):
 async def responses(request: Request):
     body = await request.json()
     initiator = _get_initiator(request) or "user"
+    original_body = dict(body)
     original_model = body.get("model", "")
     body["model"] = _apply_model_map(original_model)
     requested_model = body.get("model", "")
-    logger.debug(
-        "Responses reasoning inputs: requested_model=%s mapped_model=%s thinking=%s output_config=%s reasoning=%s reasoning_effort=%s",
-        original_model,
-        requested_model,
-        body.get("thinking"),
-        body.get("output_config"),
-        body.get("reasoning"),
-        body.get("reasoning_effort"),
-    )
     if "thinking" in body:
         body["_copilot_adapter_thinking"] = body.pop("thinking")
         body = _normalize_request_params(
@@ -2269,8 +2275,10 @@ async def responses(request: Request):
     account = account_mgr.get_username(client)
 
     logger.info(
-        "Responses requested by %s (model: %s, reasoning: %s, account: %s)",
-        initiator, requested_model, _reasoning_level_for_log(body), account,
+        "Responses requested by %s (provider: %s, model: %s, reasoning: %s, account: %s)",
+        initiator, _infer_provider_from_model(requested_model),
+        _model_for_log(original_model, requested_model),
+        _reasoning_for_log(original_body, body), account,
     )
 
     if body.get("stream"):
@@ -2374,14 +2382,16 @@ async def responses(request: Request):
 async def embeddings(request: Request):
     body = await request.json()
     initiator = _get_initiator(request) or "user"
-    body["model"] = _apply_model_map(body.get("model", ""))
+    original_model = body.get("model", "")
+    body["model"] = _apply_model_map(original_model)
     client = await account_mgr.get_client(initiator=initiator)
     account = account_mgr.get_username(client)
     model = body.get("model", "")
 
     logger.info(
-        "Embeddings requested by %s (model: %s, reasoning: n/a, account: %s)",
-        initiator, model, account,
+        "Embeddings requested by %s (provider: %s, model: %s, reasoning: n/a, account: %s)",
+        initiator, _infer_provider_from_model(model),
+        _model_for_log(original_model, model), account,
     )
     while True:
         resp = await client.embeddings(body, initiator=initiator)
@@ -2583,10 +2593,12 @@ async def gemini_generate_content(model_id: str, request: Request):
 @app.post("/v1beta/models/{model_id}:streamGenerateContent")
 async def gemini_stream_generate_content(model_id: str, request: Request):
     body = await request.json()
+    source_body = dict(body)
     adapter = GeminiAdapter(model_id)
     resolved = _get_initiator(request) or adapter.infer_initiator(body)
     openai_body = adapter.convert_chat_request(body)
-    openai_body["model"] = _apply_model_map(openai_body.get("model", ""))
+    original_model = openai_body.get("model", "")
+    openai_body["model"] = _apply_model_map(original_model)
     openai_body["stream"] = True
     requested_model = openai_body.get("model", "")
     openai_body = _normalize_request_params(openai_body, "gemini", requested_model)
@@ -2596,8 +2608,10 @@ async def gemini_stream_generate_content(model_id: str, request: Request):
     account = account_mgr.get_username(client)
 
     logger.info(
-        "Chat completion requested by %s (model: %s, reasoning: %s, account: %s)",
-        resolved, requested_model, _reasoning_level_for_log(openai_body), account,
+        "Chat completion requested by %s (provider: %s, model: %s, reasoning: %s, account: %s)",
+        resolved, _infer_provider_from_model(requested_model),
+        _model_for_log(original_model, requested_model),
+        _reasoning_for_log(source_body, openai_body), account,
     )
 
     openai_body["stream_options"] = {"include_usage": True}
