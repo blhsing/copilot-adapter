@@ -62,7 +62,7 @@ def anthropic_adapter() -> AnthropicAdapter:
 # A model known to be available via Copilot
 # ---------------------------------------------------------------------------
 
-# Cheapest models per category (0 premium requests / lowest tier)
+# Cheapest models per category.
 CHAT_MODEL = "gpt-4o-mini"
 RESPONSES_MODEL = "gpt-5-mini"
 EMBEDDINGS_MODEL = "text-embedding-3-small"

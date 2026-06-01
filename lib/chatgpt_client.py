@@ -2,7 +2,7 @@
 
 Pools ChatGPT Plus/Pro/Business subscriptions alongside Copilot + Anthropic.
 Talks to ``chatgpt.com/backend-api/codex`` — the endpoint the Codex CLI uses —
-serving the OpenAI Responses API against the plan's quota. Responses-only:
+serving the OpenAI Responses API against ChatGPT subscription limits. Responses-only:
 the dispatcher only routes ``/v1/responses`` traffic here.
 
 Auth is an OAuth bearer token from the device flow (see :mod:`lib.openai_auth`)
@@ -99,9 +99,30 @@ class ChatGPTClient:
         """Return live utilization 0..1 (the binding rate-limit window), or None.
 
         GET /backend-api/wham/usage -> { rate_limit: { primary_window:
-        {used_percent, ...}, secondary_window: {...} } }. Best-effort: any
-        failure (Cloudflare challenge, 401, shape change) returns None.
+        {used_percent, ...}, secondary_window: {...} } }. These are usually
+        the 5-hour and 7-day Codex windows, and the payload may include the
+        exact duration. Best-effort: any failure (Cloudflare challenge, 401,
+        shape change) returns None.
         """
+        data = await self.fetch_usage_details()
+        if not data:
+            return None
+        try:
+            rl = data.get("rate_limit") or {}
+            pcts = []
+            for win in ("primary_window", "secondary_window"):
+                w = rl.get(win) or {}
+                up = w.get("used_percent")
+                if up is not None:
+                    pcts.append(float(up))
+            if not pcts:
+                return None
+            return max(pcts) / 100.0
+        except Exception:
+            return None
+
+    async def fetch_usage_details(self) -> dict | None:
+        """Return the raw ChatGPT usage payload, or None on error."""
         try:
             token = await self._token_manager.get_token()
             headers = {
@@ -114,15 +135,6 @@ class ChatGPTClient:
                 r = await client.get(CHATGPT_USAGE_URL, headers=headers)
             if r.status_code != 200:
                 return None
-            rl = (r.json() or {}).get("rate_limit") or {}
-            pcts = []
-            for win in ("primary_window", "secondary_window"):
-                w = rl.get(win) or {}
-                up = w.get("used_percent")
-                if up is not None:
-                    pcts.append(float(up))
-            if not pcts:
-                return None
-            return max(pcts) / 100.0
+            return r.json() or {}
         except Exception:
             return None

@@ -6,14 +6,12 @@ Authenticates via GitHub's device-flow OAuth, then proxies requests to GitHub Co
 
 ## Key features
 
-- [**Multi-account pooling**](#multi-account) — Rotate between multiple GitHub Copilot accounts to pool premium request quotas, with automatic exhaustion detection and account switching
+- [**Multi-account pooling**](#multi-account) — Rotate between multiple GitHub Copilot accounts and subscription backends, with automatic rate-limit handling and account switching
 - [**Claude Max subscription pooling**](#claude-max-subscription-pooling) — Pool real Claude.ai Max subscriptions alongside Copilot accounts; native ``/v1/messages`` requests prefer Anthropic accounts and fall back to Copilot when the Anthropic pool is exhausted
-- [**Conversation-keyed account stickiness**](#multi-account) — Multi-turn conversations stay pinned to one account across the pool (SHA1 of the first user message → account, 1-hour idle TTL) so billing visibility doesn't fragment across rotations
-- [**Per-account plan and quota**](#per-account-plan-and-quota) — Mix accounts on different Copilot tiers with per-account quota limits that auto-derive from the plan
-- [**Smart premium request billing**](#premium-request-billing) — Automatically avoids extra premium request charges for agentic follow-ups, with no client-side changes needed
-- [**Rate limit handling**](#premium-request-billing) — Automatically retries on rate limit errors by rotating to the next available account
+- [**Conversation-keyed account stickiness**](#multi-account) — Multi-turn conversations stay pinned to one account across the pool (SHA1 of the first user message → account, 1-hour idle TTL) so provider state doesn't fragment across rotations
+- [**Rate limit handling**](#multi-account) — Automatically retries on rate limit errors by rotating to the next available account
 - [**Three API formats**](#endpoints) — Serves OpenAI, Anthropic, and Gemini endpoints simultaneously
-- [**Forward proxy mode**](#forward-proxy-mode) — Acts as an HTTP/HTTPS proxy that intercepts Copilot API traffic and rewrites billing headers, and transparently reroutes requests for OpenAI, Anthropic, and Gemini APIs through Copilot
+- [**Forward proxy mode**](#forward-proxy-mode) — Acts as an HTTP/HTTPS proxy that intercepts Copilot API traffic and rewrites initiator headers, and transparently reroutes requests for OpenAI, Anthropic, and Gemini APIs through Copilot
 - [**One-command tool setup**](#tool-configuration) — Automatically configure popular agentic coding tools (Claude Code, Codex, Gemini CLI, OpenCode) to use this proxy, with easy revert to defaults
 - [**Configurable model mapping**](#model-mapping) — Built-in Claude model-ID normalization plus optional glob-pattern overrides
 - [**Cross-provider reasoning effort mapping**](#parameter-compatibility) — Preserves Anthropic thinking / `output_config.effort` when requests are mapped to OpenAI-style models, including Responses-only targets like `gpt-5.5`
@@ -29,7 +27,7 @@ Authenticates via GitHub's device-flow OAuth, then proxies requests to GitHub Co
 
 - Python 3.10+
 - pip
-- A GitHub account with [GitHub Copilot](https://github.com/features/copilot) access (the free tier works; paid plans provide higher premium request quotas)
+- A GitHub account with [GitHub Copilot](https://github.com/features/copilot) access, or an Anthropic/OpenAI subscription account for those optional pools
 
 ## Setup
 
@@ -58,31 +56,9 @@ python copilot_adapter.py logout
 
 Token lookup order: cached device-flow tokens > interactive device flow. `--github-token` and `COPILOT_ADAPTER_GITHUB_TOKEN` / `GITHUB_TOKEN` are still accepted for supplying OAuth tokens (`ghu_`) obtained out-of-band, but `ghp_` Personal Access Tokens are rejected with a warning — the Copilot API does not accept them.
 
-### Per-account plan and quota
-
-When accounts are on different Copilot tiers, append the plan and quota limit to the token with colons. (Device-flow login prompts for plan/quota interactively, but these may also be supplied via CLI/env for OAuth tokens obtained out-of-band.)
-
-```bash
-# TOKEN:PLAN:QUOTA format
-python copilot_adapter.py serve \
-  --github-token ghu_aaa:pro:300 \
-  --github-token ghu_bbb:free:50
-
-# TOKEN:PLAN:QUOTA:USAGE format (specify current premium usage)
-python copilot_adapter.py serve \
-  --github-token ghu_aaa:pro:300:150.5 \
-  --github-token ghu_bbb:free:50:12
-
-# Bare tokens fall back to the global --plan default (pro) and its quota (300)
-python copilot_adapter.py serve \
-  --github-token ghu_aaa:enterprise:1000 \
-  --github-token ghu_bbb:free:50 \
-  --github-token ghu_ccc
-```
-
 ### Multi-account
 
-Pool multiple GitHub Copilot accounts to extend your premium request quota:
+Use multiple GitHub Copilot accounts, plus optional Anthropic and ChatGPT subscription pools:
 
 ```bash
 # Add accounts via device-flow login (run multiple times)
@@ -96,14 +72,11 @@ python copilot_adapter.py serve --github-token ghu_aaa --github-token ghu_bbb
 export COPILOT_ADAPTER_GITHUB_TOKEN=ghu_aaa,ghu_bbb
 python copilot_adapter.py serve
 
-# List cached accounts (shows plan, quota, and usage)
+# List cached accounts (Copilot validity, Anthropic/ChatGPT live usage)
 python copilot_adapter.py accounts
 
-# Add an OAuth token to the cache (with optional plan/quota/usage)
-python copilot_adapter.py accounts --add ghu_xxx --plan pro --quota-limit 300 --usage 50
-
-# Update plan/quota/usage for a cached account
-python copilot_adapter.py accounts --update octocat --plan pro+ --quota-limit 1500 --usage 200
+# Add an OAuth token to the cache
+python copilot_adapter.py accounts --add ghu_xxx
 
 # Remove a cached account
 python copilot_adapter.py accounts --remove octocat
@@ -116,14 +89,12 @@ python copilot_adapter.py logout --all
 
 | Strategy | Behavior | Notes |
 |----------|----------|-------|
-| `least-utilized` (default) | Pick the account with the lowest **live** utilization, fetched from the backend's usage endpoint | Spreads load by real remaining quota. Anthropic (`/api/oauth/usage`) and ChatGPT (`/backend-api/wham/usage`) report utilization; Copilot has no per-account signal (credit-based pricing) so Copilot accounts round-robin |
+| `least-utilized` (default) | Pick the account with the lowest **live** utilization, fetched from the backend's usage endpoint | Anthropic (`/api/oauth/usage`) and ChatGPT (`/backend-api/wham/usage`) report utilization; Copilot has no per-account usage signal, so Copilot accounts round-robin |
 | `round-robin` | Rotate blindly on each user-initiated request | Simple; ignores usage |
-
-The legacy `max-usage` / `min-usage` strategies were removed (Copilot's move to credit-based pricing made the per-request quota counter meaningless) and now map to `least-utilized`.
 
 Agent-initiated requests (tool-use follow-ups) always stay on the same account as the preceding user request. A background poller (~3 min) refreshes live utilization for Anthropic/ChatGPT accounts.
 
-**Quota exhaustion detection**: When a Copilot account's quota is exhausted, GitHub silently downgrades the response to a free fallback model (e.g. GPT-4.1) instead of erroring. The server compares the response model against the requested model — on a mismatch it sidelines the account and retries with the next available one (streaming + non-streaming).
+**Model fallback detection**: If GitHub returns a different model than requested, the server treats that as an upstream fallback signal, sidelines the account, and retries with the next available one (streaming + non-streaming).
 
 **Rate-limit back-off**: A 429 (or the model-mismatch sideline above) makes an account unavailable for `--rate-limit-backoff-minutes` (default 60), after which it's eligible again automatically. Anthropic 429s use the precise `anthropic-ratelimit-*-reset` hint instead.
 
@@ -196,11 +167,8 @@ Example `~/.config/copilot-adapter/config.json`:
 {
   "host": "0.0.0.0",
   "port": 18080,
-  "strategy": "max-usage",
-  "plan": "pro",
+  "strategy": "least-utilized",
   "log_file": "/path/to/copilot-adapter.log",
-  "free": false,
-  "free_within_minutes": 5,
   "proxy": false,
   "proxy_user": "myuser",
   "proxy_password": "mypassword",
@@ -213,18 +181,17 @@ Example `~/.config/copilot-adapter/config.json`:
   "api_tokens": ["sk-abc123...", "sk-def456..."],
   "web_search_iterations": 3,
   "accounts": [
-    {"token": "ghu_aaa", "plan": "enterprise", "quota_limit": 1000, "premium_used": 250},
-    {"token": "ghu_bbb", "plan": "free"},
-    "ghu_ccc:pro+:1500:100.5",
+    {"token": "ghu_aaa"},
+    {"token": "ghu_bbb"},
+    "ghu_ccc",
     "ghu_ddd"
   ]
 }
 ```
 
 Account entries in the `accounts` array can be:
-- **Objects** with `token` (required), `plan`, `quota_limit`, and `premium_used` (all optional) fields
-- **Strings** in `TOKEN:PLAN:QUOTA:USAGE` format (same as the CLI `--github-token` syntax)
-- **Bare token strings** that fall back to the top-level `plan` and `quota_limit` defaults
+- **Objects** with `token` (required)
+- **Bare token strings**
 
 **Precedence** (highest to lowest): CLI flags > environment variables > config file > built-in defaults.
 
@@ -240,16 +207,10 @@ All CLI options can be set via environment variables:
 | `--github-token` | `COPILOT_ADAPTER_GITHUB_TOKEN` | *(none)* |
 | `--cors-origin` | `COPILOT_ADAPTER_CORS_ORIGIN` | *(none)* |
 | `--workers` | `COPILOT_ADAPTER_WORKERS` | `1` |
-| `--strategy` | `COPILOT_ADAPTER_STRATEGY` | `max-usage` |
-| `--quota-limit` | `COPILOT_ADAPTER_QUOTA_LIMIT` | per plan |
+| `--strategy` | `COPILOT_ADAPTER_STRATEGY` | `least-utilized` |
 | `--rate-limit-backoff-minutes` | `COPILOT_ADAPTER_RATE_LIMIT_BACKOFF_MINUTES` | `60` |
-| `--plan` | `COPILOT_ADAPTER_PLAN` | `pro` |
 | `--log-level` | `COPILOT_ADAPTER_LOG_LEVEL` | `info` |
 | `--log-file` | `COPILOT_ADAPTER_LOG_FILE` | *(none)* |
-| `--free` | `COPILOT_ADAPTER_FREE` | *(off)* |
-| `--free-within-minutes` | `COPILOT_ADAPTER_FREE_WITHIN_MINUTES` | *(off)* |
-| `--stub-bill` | `COPILOT_ADAPTER_STUB_BILL` | *(off)* |
-| `--stub-model` | `COPILOT_ADAPTER_STUB_MODEL` | `claude-haiku-4.5` |
 | `--proxy` | `COPILOT_ADAPTER_PROXY` | *(off)* |
 | `--ca-dir` | `COPILOT_ADAPTER_CA_DIR` | `~/.config/copilot-adapter` |
 | `--model-map` | `COPILOT_ADAPTER_MODEL_MAP` | *(none — Claude IDs auto-normalized)* |
@@ -293,8 +254,7 @@ docker run -p 18080:18080 \
 # Multi-account with rotation (login multiple times, then serve)
 docker run -p 18080:18080 \
   -v copilot-adapter-config:/root/.config/copilot-adapter \
-  -e COPILOT_ADAPTER_STRATEGY=max-usage \
-  -e COPILOT_ADAPTER_QUOTA_LIMIT=300 \
+  -e COPILOT_ADAPTER_STRATEGY=least-utilized \
   ghcr.io/blhsing/copilot-adapter
 ```
 
@@ -368,61 +328,16 @@ GET  /v1beta/models/{model}
 
 All endpoints support streaming.
 
-## Premium request billing
+## Initiator Handling
 
-GitHub Copilot uses the `X-Initiator` header to determine whether an API call counts as a premium request:
-
-- `X-Initiator: user` — counts as a premium request
-- `X-Initiator: agent` — free (treated as an autonomous agent follow-up)
-
-The proxy handles this automatically. When no `X-Initiator` header is provided by the caller, it inspects the request body and infers the correct value:
+The proxy preserves an explicit `X-Initiator` header from the caller. When no `X-Initiator` header is provided, it inspects the request body and infers the correct value:
 
 - **OpenAI format** — `agent` if the last message has `role: "tool"`, or if any prior message contains tool calls or tool responses
 - **Anthropic format** — `agent` if the last message contains a `tool_result` content block, or if any prior assistant message contains a `tool_use` block
 - **Gemini format** — `agent` if the last turn contains a `functionResponse` part, or if any prior turn contains a `functionCall` or `functionResponse`
 - Otherwise — `user`
 
-This means agentic clients like Claude Code that make multiple API calls per user turn (tool-use loops, retries, subagent spawns, auto-continues) will only consume one premium request for the initial prompt — follow-up calls are automatically marked as `agent`. No client-side changes needed.
-
-Callers can also pass `X-Initiator` explicitly to override the heuristic.
-
-### Free mode
-
-Use `--free` to mark **all** requests as agent-initiated, so nothing counts as a premium request:
-
-```bash
-python copilot_adapter.py serve --free
-```
-
-This is useful when you want to avoid all premium billing regardless of request type. Note that GitHub Copilot may throttle or deprioritize agent-initiated requests compared to user-initiated ones.
-
-### Time-based free mode
-
-Use `--free-within-minutes N` to mark a user-initiated request as agent-initiated only if the last request to the same account was less than N minutes ago:
-
-```bash
-python copilot_adapter.py serve --free-within-minutes 5
-```
-
-The logic: the first request in a session is billed normally (as `user`), but subsequent requests within the time window are marked as `agent` (free). Once the account has been idle for longer than N minutes, the next request is treated as a new session and billed normally again.
-
-This is useful when you want to limit premium billing to one request per session rather than eliminating it entirely. It's mutually exclusive with `--free`.
-
-When using multi-account rotation, agent-initiated requests always stay on the same account as the preceding user request to avoid billing a premium request on a different account.
-
-### Stub-bill mode
-
-Use `--stub-bill` to route billing through a cheap stub model. For each user-initiated request, the adapter first fires a tiny billed call (one-token `"test"` prompt) against `--stub-model` (default `claude-haiku-4.5`), then runs the real request marked as agent-initiated:
-
-```bash
-python copilot_adapter.py serve --stub-bill
-# or with a custom stub model
-python copilot_adapter.py serve --stub-bill --stub-model claude-haiku-4.5
-```
-
-This satisfies Copilot's "one premium request per user turn" accounting with the cheapest eligible model, while the actual (potentially expensive) request runs as agent — so a large opus-4.7 call effectively costs one haiku premium request instead of one opus premium request.
-
-Costs: the stub call runs in the background concurrently with the real request, so there is no added latency. If the stub call fails (rate limit, 5xx, quota exhausted), the real request has already gone out as agent and is not billed — the billing slot is skipped for that turn, but the user request still completes. Independent from `--free` / `--free-within-minutes`: when those already demote the request to agent, the stub is skipped.
+This keeps tool-use follow-ups and agentic retry loops labeled consistently across client formats. Callers can still pass `X-Initiator` explicitly to override the heuristic.
 
 ## Forward proxy mode
 
@@ -434,7 +349,7 @@ python copilot_adapter.py serve --proxy
 
 The proxy intercepts HTTPS connections to the following hosts:
 
-- **`api.githubcopilot.com`** — rewrites `X-Initiator: user` to `agent` so requests are not billed as premium
+- **`api.githubcopilot.com`** — rewrites `X-Initiator: user` to `agent` for Copilot traffic
 - **`api.openai.com`**, **`api.anthropic.com`**, **`generativelanguage.googleapis.com`** — LLM API requests are redirected to the local adapter and routed through Copilot; non-API requests (e.g. update checks, MCP registry) are forwarded to the original host
 
 All other traffic is tunneled transparently. If `HTTPS_PROXY` or `HTTP_PROXY` is set, outbound connections are chained through the upstream proxy.
@@ -464,7 +379,7 @@ The client must trust this CA for HTTPS interception to work:
   certutil -addstore Root "%USERPROFILE%\.config\copilot-adapter\ca.pem"
   ```
 
-This mode is useful when you want to transparently reduce premium billing for any client that supports `HTTPS_PROXY`, without changing the client's API endpoint configuration.
+This mode is useful when you want to transparently route any client that supports `HTTPS_PROXY`, without changing the client's API endpoint configuration.
 
 ## Model mapping
 
@@ -692,7 +607,7 @@ Tests are organized into four modules:
 - **`test_endpoints.py`** — FastAPI routes via ASGI transport: all endpoints across all three API formats
 - **`test_account_manager.py`** — account rotation strategies, agent stickiness, exhaustion detection (unit tests, no auth required)
 
-Tests use the cheapest available models (`gpt-4o-mini` for chat, `gpt-5-mini` for responses, `text-embedding-3-small` for embeddings) to minimize premium request usage. Model constants are centralized in `tests/conftest.py`.
+Tests use the cheapest available models (`gpt-4o-mini` for chat, `gpt-5-mini` for responses, `text-embedding-3-small` for embeddings). Model constants are centralized in `tests/conftest.py`.
 
 ## How it works
 
@@ -700,7 +615,7 @@ Tests use the cheapest available models (`gpt-4o-mini` for chat, `gpt-5-mini` fo
 2. GitHub tokens are exchanged for short-lived Copilot API tokens via `api.github.com/copilot_internal/v2/token`, automatically refreshed every ~25 minutes with concurrent-access protection (double-checked locking ensures only one refresh happens at a time)
 3. For multi-account setups, the `AccountManager` selects which account to use based on the configured rotation strategy, sticking to the same account for agent-initiated follow-ups
 4. Incoming requests are translated (if needed) to the format Copilot expects, model names are rewritten via the configurable model map, the correct upstream endpoint is selected (`/v1/messages`, `/v1/chat/completions`, or `/v1/responses`), and responses are translated back to the client's expected format
-5. In forward proxy mode (`--proxy`), the server also accepts `CONNECT` tunnels on the same port — traffic to `api.githubcopilot.com` is MITM'd to rewrite billing headers, traffic to OpenAI/Anthropic/Gemini APIs is redirected to the local adapter, and all other traffic is tunneled transparently
+5. In forward proxy mode (`--proxy`), the server also accepts `CONNECT` tunnels on the same port — traffic to `api.githubcopilot.com` is MITM'd to rewrite initiator headers, traffic to OpenAI/Anthropic/Gemini APIs is redirected to the local adapter, and all other traffic is tunneled transparently
 
 ## Known issues
 

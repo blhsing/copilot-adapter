@@ -28,11 +28,6 @@ from .anthropic_client import AnthropicClient
 logger = logging.getLogger(__name__)
 
 account_mgr: AccountManager | None = None
-_force_free: bool = False
-_free_within_minutes: float | None = None
-_stub_bill: bool = False
-_stub_model: str = "claude-haiku-4.5"
-_pending_stub_tasks: set[asyncio.Task] = set()
 _model_map: list[tuple[str, str]] = []
 _api_tokens: set[str] | None = None
 _web_search_max_iterations: int = 3
@@ -207,6 +202,38 @@ def _normalize_output_effort(effort: str | None) -> str | None:
         "max": "xhigh",
         "xhigh": "xhigh",
     }.get(normalized)
+
+
+def _reasoning_level_for_log(body: dict) -> str:
+    """Return the best available reasoning effort label for request logging."""
+    effort = body.get("reasoning_effort")
+    if isinstance(effort, str) and effort:
+        return effort
+
+    reasoning = body.get("reasoning")
+    if isinstance(reasoning, dict):
+        effort = reasoning.get("effort")
+        if isinstance(effort, str) and effort:
+            return effort
+
+    output_config = body.get("output_config")
+    if isinstance(output_config, dict):
+        effort = output_config.get("effort")
+        if isinstance(effort, str) and effort:
+            return effort
+
+    effort = _normalize_output_effort(body.get("_copilot_adapter_output_effort"))
+    if effort:
+        return effort
+
+    thinking = body.get("_copilot_adapter_thinking")
+    if thinking is None:
+        thinking = body.get("thinking")
+    effort = _normalize_thinking_to_effort(thinking)
+    if effort:
+        return effort
+
+    return "default"
 
 
 def _normalize_reasoning_params(
@@ -652,10 +679,6 @@ def _build_web_search_content_blocks(
 async def _lifespan(application: FastAPI):
     """Initialize the AccountManager in each worker process on startup."""
     global account_mgr
-    global _force_free
-    global _free_within_minutes
-    global _stub_bill
-    global _stub_model
     global _model_map
     global _api_tokens
     global _web_search_max_iterations
@@ -663,30 +686,18 @@ async def _lifespan(application: FastAPI):
     global _web_search_model
     global _copilot_only_matcher
     tokens_raw = os.environ.get("_COPILOT_ADAPTER_GITHUB_TOKENS", "")
-    if tokens_raw and account_mgr is None:
-        _force_free = os.environ.get("_COPILOT_ADAPTER_FREE", "") == "1"
-        fwm_raw = os.environ.get("_COPILOT_ADAPTER_FREE_WITHIN_MINUTES", "")
-        _free_within_minutes = float(fwm_raw) if fwm_raw else None
-        _stub_bill = os.environ.get("_COPILOT_ADAPTER_STUB_BILL", "") == "1"
-        _stub_model = os.environ.get("_COPILOT_ADAPTER_STUB_MODEL", "") or "claude-haiku-4.5"
-        # Format: "token1:username1:plan1:quota1:usage1,..."
-        strategy = os.environ.get("_COPILOT_ADAPTER_STRATEGY", "max-usage")
-        quota_limit_raw = os.environ.get("_COPILOT_ADAPTER_QUOTA_LIMIT", "")
-        quota_limit = int(quota_limit_raw) if quota_limit_raw else None
-        plan = os.environ.get("_COPILOT_ADAPTER_PLAN", "pro")
+    worker_init = os.environ.get("_COPILOT_ADAPTER_WORKER_INIT", "") == "1"
+    if account_mgr is None and (tokens_raw or worker_init):
+        strategy = os.environ.get("_COPILOT_ADAPTER_STRATEGY", "least-utilized")
         accounts: list[dict] = []
         for entry in tokens_raw.split(","):
             parts = entry.split(":")
             if len(parts) >= 2:
-                acct: dict = {"token": parts[0], "username": parts[1],
-                              "backend": "copilot"}
-                if len(parts) >= 3 and parts[2]:
-                    acct["plan"] = parts[2]
-                if len(parts) >= 4 and parts[3]:
-                    acct["quota_limit"] = int(parts[3])
-                if len(parts) >= 5 and parts[4]:
-                    acct["premium_used"] = float(parts[4])
-                accounts.append(acct)
+                accounts.append({
+                    "token": parts[0],
+                    "username": parts[1],
+                    "backend": "copilot",
+                })
         # Anthropic accounts come from the on-disk cache, not env vars —
         # they carry refresh tokens that we don't want to serialize through
         # a worker-spawn environment variable.
@@ -710,9 +721,7 @@ async def _lifespan(application: FastAPI):
             from . import anthropic_client as _ac
             _ac.SPOOF_INTERACTIVE = True
 
-        account_mgr = AccountManager(
-            accounts, strategy=strategy, quota_limit=quota_limit, plan=plan,
-        )
+        account_mgr = AccountManager(accounts, strategy=strategy)
 
         model_map_raw = os.environ.get("_COPILOT_ADAPTER_MODEL_MAP", "")
         if model_map_raw:
@@ -767,22 +776,14 @@ app = FastAPI(title="Copilot API", version="0.1.0", lifespan=_lifespan)
 
 def init_app(
     mgr: AccountManager, cors_origins: list[str] | None = None,
-    force_free: bool = False,
-    free_within_minutes: float | None = None,
-    stub_bill: bool = False,
-    stub_model: str = "claude-haiku-4.5",
     model_map: list[tuple[str, str]] | None = None,
     api_tokens: list[str] | None = None,
     web_search_max_iterations: int = 1,
     force_ddg_web_search: bool = False,
     web_search_model: str | None = None,
 ) -> FastAPI:
-    global account_mgr, _force_free, _free_within_minutes, _stub_bill, _stub_model, _model_map, _api_tokens, _web_search_max_iterations, _force_ddg_web_search, _web_search_model
+    global account_mgr, _model_map, _api_tokens, _web_search_max_iterations, _force_ddg_web_search, _web_search_model
     account_mgr = mgr
-    _force_free = force_free
-    _free_within_minutes = free_within_minutes
-    _stub_bill = stub_bill
-    _stub_model = stub_model
     _model_map = model_map if model_map is not None else load_default_model_map()
     _api_tokens = set(api_tokens) if api_tokens else None
     _web_search_max_iterations = web_search_max_iterations
@@ -827,8 +828,6 @@ async def _check_api_token(request: Request, call_next):
 
 def _get_initiator(request: Request) -> str | None:
     """Extract X-Initiator from the incoming request, or None if absent."""
-    if _force_free:
-        return "agent"
     return request.headers.get("x-initiator")
 
 
@@ -1310,50 +1309,6 @@ def _debug_error(
     logger.debug("Upstream error message window: %s", json.dumps(window, ensure_ascii=False))
 
 
-async def _maybe_consume_billed_stub(client, resolved: str, requested_model: str) -> str:
-    """If --stub-bill is on and this call would be billed, fire a tiny cheap
-    billed request against _stub_model in the background so it absorbs the
-    premium-request charge, and return "agent" immediately so the real call
-    is not billed and can be sent in parallel. If the background stub fails,
-    the real request has already been committed as agent — the billing slot
-    is lost, but the user request still completes."""
-    if not _stub_bill or _force_free or resolved != "user":
-        return resolved
-    stub_body = {
-        "model": _stub_model,
-        "messages": [{"role": "user", "content": "test"}],
-        "max_tokens": 1,
-        "stream": False,
-    }
-
-    async def _run_stub():
-        try:
-            resp = await client.messages(stub_body, initiator="user")
-            if resp.status_code != 200:
-                logger.warning(
-                    "Stub-bill background call failed (%s %s)",
-                    resp.status_code, resp.text[:200],
-                )
-                return
-            await account_mgr.record_usage(client, _stub_model)
-            logger.info("Stub-bill: billed %s in background", _stub_model)
-        except Exception as e:
-            logger.warning("Stub-bill background exception (%s)", e)
-
-    # Record the request time eagerly so a closely-following user request sees
-    # it via free-within-minutes and gets demoted to agent instead of firing a
-    # second redundant stub while this one is still in flight.
-    await account_mgr.record_request_time(client)
-    task = asyncio.create_task(_run_stub())
-    _pending_stub_tasks.add(task)
-    task.add_done_callback(_pending_stub_tasks.discard)
-    logger.info(
-        "Stub-bill: demoting real %s request to agent; %s stub fired in background",
-        requested_model, _stub_model,
-    )
-    return "agent"
-
-
 async def handle_chat_completion(
     adapter: FormatAdapter, body: dict, *, request: Request | None = None, initiator: str | None = None
 ):
@@ -1378,20 +1333,13 @@ async def handle_chat_completion(
     conv_key = _derive_conv_key(body, source_provider)
     client = await account_mgr.get_client(initiator=resolved, conv_key=conv_key)
 
-    # Time-based free override: if the last request was within N minutes, mark as agent
-    if _free_within_minutes is not None and resolved == "user":
-        elapsed = await account_mgr.get_minutes_since_last_request(client)
-        if elapsed is not None and elapsed < _free_within_minutes:
-            resolved = "agent"
-            logger.info("free-within-minutes: last request %.1f min ago < %.1f → agent",
-                        elapsed, _free_within_minutes)
-
     account = account_mgr.get_username(client)
 
-    resolved = await _maybe_consume_billed_stub(client, resolved, requested_model)
-
-    billed_status = "yes" if resolved == "user" else "no"
-    logger.info("Chat completion requested by %s (billed: %s, model: %s, account: %s)", resolved, billed_status, requested_model, account)
+    logger.info(
+        "Chat completion requested by %s (model: %s, reasoning: %s, account: %s)",
+        resolved, requested_model, _reasoning_level_for_log(openai_body),
+        account,
+    )
 
     is_stream = adapter.is_streaming(body) or openai_body.get("stream")
 
@@ -1444,7 +1392,7 @@ async def handle_chat_completion(
                             if not _is_model_match(requested_model, resp_model):
                                 logger.warning(
                                     "Model mismatch: requested %s, got %s — "
-                                    "quota likely exhausted, switching account",
+                                    "upstream model fallback detected, switching account",
                                     requested_model, resp_model,
                                 )
                                 fallback = await account_mgr.get_fallback_client(client)
@@ -1454,9 +1402,8 @@ async def handle_chat_completion(
                                     needs_retry = True
                                     break
                             else:
-                                if not _force_free and resolved == "user":
+                                if resolved == "user":
                                     await account_mgr.record_usage(client, requested_model)
-                                await account_mgr.record_request_time(client)
 
                     # Only buffer when we might need to intercept web_search
                     if should_intercept_web_search:
@@ -1585,7 +1532,7 @@ async def handle_chat_completion(
         if resp_model and not _is_model_match(requested_model, resp_model):
             logger.warning(
                 "Model mismatch: requested %s, got %s — "
-                "quota likely exhausted, switching account",
+                "upstream model fallback detected, switching account",
                 requested_model, resp_model,
             )
             fallback = await account_mgr.get_fallback_client(client)
@@ -1594,9 +1541,8 @@ async def handle_chat_completion(
                 continue
         break
 
-    if not _force_free and resolved == "user":
+    if resolved == "user":
         await account_mgr.record_usage(client, requested_model)
-    await account_mgr.record_request_time(client)
 
     # Check for web_search in non-streaming response
     choice = (resp_data.get("choices") or [{}])[0]
@@ -1686,21 +1632,12 @@ async def handle_native_anthropic_messages(
     else:
         upstream_body = _sanitize_native_anthropic_body(body)
 
-    if _free_within_minutes is not None and resolved == "user":
-        elapsed = await account_mgr.get_minutes_since_last_request(client)
-        if elapsed is not None and elapsed < _free_within_minutes:
-            resolved = "agent"
-            logger.info("free-within-minutes: last request %.1f min ago < %.1f → agent",
-                        elapsed, _free_within_minutes)
-
     account = account_mgr.get_username(client)
     backend = account_mgr.get_backend(client)
-    resolved = await _maybe_consume_billed_stub(client, resolved, requested_model)
-
-    billed_status = "yes" if resolved == "user" else "no"
     logger.info(
-        "Anthropic native messages requested by %s (billed: %s, model: %s, account: %s[%s])",
-        resolved, billed_status, requested_model, account, backend,
+        "Anthropic native messages requested by %s (model: %s, reasoning: %s, account: %s[%s])",
+        resolved, requested_model, _reasoning_level_for_log(upstream_body),
+        account, backend,
     )
 
     if upstream_body.get("stream"):
@@ -1780,9 +1717,8 @@ async def handle_native_anthropic_messages(
                         return
                     if not recorded and line:
                         recorded = True
-                        if not _force_free and resolved == "user":
+                        if resolved == "user":
                             await account_mgr.record_usage(client, requested_model)
-                        await account_mgr.record_request_time(client)
                     result = _passthrough_sse_line(line)
                     if result:
                         yield result
@@ -1851,7 +1787,7 @@ async def handle_native_anthropic_messages(
         resp_model = resp_data.get("model", "")
         if resp_model and not _is_model_match(requested_model, resp_model):
             logger.warning(
-                "Model mismatch: requested %s, got %s — quota likely exhausted, switching account",
+                "Model mismatch: requested %s, got %s — upstream model fallback detected, switching account",
                 requested_model, resp_model,
             )
             fallback = await account_mgr.get_fallback_client(
@@ -1868,9 +1804,8 @@ async def handle_native_anthropic_messages(
                 continue
         break
 
-    if not _force_free and resolved == "user":
+    if resolved == "user":
         await account_mgr.record_usage(client, requested_model)
-    await account_mgr.record_request_time(client)
     return JSONResponse(content=resp_data, status_code=resp.status_code)
 
 
@@ -1900,22 +1835,11 @@ async def handle_anthropic_via_responses(
     conv_key = _derive_conv_key(body, "anthropic")
     client = await account_mgr.get_client(initiator=resolved, conv_key=conv_key)
 
-    if _free_within_minutes is not None and resolved == "user":
-        elapsed = await account_mgr.get_minutes_since_last_request(client)
-        if elapsed is not None and elapsed < _free_within_minutes:
-            resolved = "agent"
-            logger.info(
-                "free-within-minutes: last request %.1f min ago < %.1f → agent",
-                elapsed, _free_within_minutes,
-            )
-
     account = account_mgr.get_username(client)
-    resolved = await _maybe_consume_billed_stub(client, resolved, requested_model)
 
-    billed_status = "yes" if resolved == "user" else "no"
     logger.info(
-        "Anthropic→Responses requested by %s (billed: %s, model: %s, account: %s)",
-        resolved, billed_status, requested_model, account,
+        "Anthropic→Responses requested by %s (model: %s, reasoning: %s, account: %s)",
+        resolved, requested_model, _reasoning_level_for_log(resp_body), account,
     )
 
     is_stream = body.get("stream")
@@ -1987,11 +1911,10 @@ async def handle_anthropic_via_responses(
                                     needs_retry = True
                                     break
                             else:
-                                if not _force_free and resolved == "user":
+                                if resolved == "user":
                                     await account_mgr.record_usage(
                                         client, requested_model
                                     )
-                                await account_mgr.record_request_time(client)
 
                     # Buffer when we might need to intercept web_search
                     if should_intercept_web_search:
@@ -2172,9 +2095,8 @@ async def handle_anthropic_via_responses(
                 continue
         break
 
-    if not _force_free and resolved == "user":
+    if resolved == "user":
         await account_mgr.record_usage(client, requested_model)
-    await account_mgr.record_request_time(client)
 
     # Check for web_search in non-streaming response
     output_items = resp_data.get("output", [])
@@ -2344,18 +2266,12 @@ async def responses(request: Request):
         initiator=initiator, conv_key=conv_key,
         force_copilot=_force_copilot_for(request))
 
-    # Time-based free override
-    if _free_within_minutes is not None and initiator == "user":
-        elapsed = await account_mgr.get_minutes_since_last_request(client)
-        if elapsed is not None and elapsed < _free_within_minutes:
-            initiator = "agent"
-            logger.info("free-within-minutes: last request %.1f min ago < %.1f → agent",
-                        elapsed, _free_within_minutes)
-
     account = account_mgr.get_username(client)
 
-    billed_status = "yes" if initiator == "user" else "no"
-    logger.info("Responses requested by %s (billed: %s, model: %s, account: %s)", initiator, billed_status, requested_model, account)
+    logger.info(
+        "Responses requested by %s (model: %s, reasoning: %s, account: %s)",
+        initiator, requested_model, _reasoning_level_for_log(body), account,
+    )
 
     if body.get("stream"):
         converter = openai_adapter.create_stream_converter(body)
@@ -2393,7 +2309,7 @@ async def responses(request: Request):
                             if not _is_model_match(requested_model, resp_model):
                                 logger.warning(
                                     "Model mismatch: requested %s, got %s — "
-                                    "quota likely exhausted, switching account",
+                                    "upstream model fallback detected, switching account",
                                     requested_model, resp_model,
                                 )
                                 fallback = await account_mgr.get_fallback_client(client)
@@ -2403,9 +2319,8 @@ async def responses(request: Request):
                                     needs_retry = True
                                     break
                             else:
-                                if not _force_free and initiator == "user":
+                                if initiator == "user":
                                     await account_mgr.record_usage(client, requested_model)
-                                await account_mgr.record_request_time(client)
                     result = converter.feed(line)
                     if result:
                         yield result
@@ -2440,7 +2355,7 @@ async def responses(request: Request):
         if resp_model and not _is_model_match(requested_model, resp_model):
             logger.warning(
                 "Model mismatch: requested %s, got %s — "
-                "quota likely exhausted, switching account",
+                "upstream model fallback detected, switching account",
                 requested_model, resp_model,
             )
             fallback = await account_mgr.get_fallback_client(client)
@@ -2451,7 +2366,6 @@ async def responses(request: Request):
     rid = resp_data.get("id") if isinstance(resp_data, dict) else None
     if isinstance(rid, str) and rid:
         await account_mgr.remember_conversation(rid, client)
-    await account_mgr.record_request_time(client)
     return JSONResponse(content=resp_data, status_code=resp.status_code)
 
 
@@ -2465,8 +2379,10 @@ async def embeddings(request: Request):
     account = account_mgr.get_username(client)
     model = body.get("model", "")
 
-    billed_status = "yes" if initiator == "user" else "no"
-    logger.info("Embeddings requested by %s (billed: %s, model: %s, account: %s)", initiator, billed_status, model, account)
+    logger.info(
+        "Embeddings requested by %s (model: %s, reasoning: n/a, account: %s)",
+        initiator, model, account,
+    )
     while True:
         resp = await client.embeddings(body, initiator=initiator)
         if resp.status_code == 429:
@@ -2677,20 +2593,12 @@ async def gemini_stream_generate_content(model_id: str, request: Request):
 
     client = await account_mgr.get_client(initiator=resolved)
 
-    # Time-based free override
-    if _free_within_minutes is not None and resolved == "user":
-        elapsed = await account_mgr.get_minutes_since_last_request(client)
-        if elapsed is not None and elapsed < _free_within_minutes:
-            resolved = "agent"
-            logger.info("free-within-minutes: last request %.1f min ago < %.1f → agent",
-                        elapsed, _free_within_minutes)
-
     account = account_mgr.get_username(client)
 
-    resolved = await _maybe_consume_billed_stub(client, resolved, requested_model)
-
-    billed_status = "yes" if resolved == "user" else "no"
-    logger.info("Chat completion requested by %s (billed: %s, model: %s, account: %s)", resolved, billed_status, requested_model, account)
+    logger.info(
+        "Chat completion requested by %s (model: %s, reasoning: %s, account: %s)",
+        resolved, requested_model, _reasoning_level_for_log(openai_body), account,
+    )
 
     openai_body["stream_options"] = {"include_usage": True}
     converter = adapter.create_stream_converter(body)
@@ -2724,7 +2632,7 @@ async def gemini_stream_generate_content(model_id: str, request: Request):
                         if not _is_model_match(requested_model, resp_model):
                             logger.warning(
                                 "Model mismatch: requested %s, got %s — "
-                                "quota likely exhausted, switching account",
+                                "upstream model fallback detected, switching account",
                                 requested_model, resp_model,
                             )
                             fallback = await account_mgr.get_fallback_client(client)
@@ -2734,9 +2642,8 @@ async def gemini_stream_generate_content(model_id: str, request: Request):
                                 needs_retry = True
                                 break
                         else:
-                            if not _force_free and resolved == "user":
+                            if resolved == "user":
                                 await account_mgr.record_usage(client, requested_model)
-                            await account_mgr.record_request_time(client)
                 result = converter.feed(line)
                 if result:
                     yield result

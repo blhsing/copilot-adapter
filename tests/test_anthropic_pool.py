@@ -120,10 +120,9 @@ def _make_dual_backend_manager() -> AccountManager:
             "access_token": "ant-access",
             "refresh_token": "ant-refresh",
             "expires_at": time.time() + 3600,
-            "plan": "max",
         },
     ]
-    return AccountManager(accounts, strategy="max-usage")
+    return AccountManager(accounts, strategy="least-utilized")
 
 
 class TestPerBackendSelection:

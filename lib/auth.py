@@ -1,7 +1,6 @@
 """GitHub Copilot device-flow OAuth and token management."""
 
 import json
-import threading
 import time
 import asyncio
 import webbrowser
@@ -43,23 +42,6 @@ def _load_github_tokens() -> list[dict]:
         data = json.loads(TOKENS_FILE.read_text())
         return data.get("accounts", [])
     return []
-
-
-def get_cached_account_meta() -> dict[str, dict]:
-    """Return a mapping of token → {plan, quota_limit, premium_used} from the token cache."""
-    meta: dict[str, dict] = {}
-    for acct in _load_github_tokens():
-        token = acct.get("github_token", "")
-        entry: dict = {}
-        if "plan" in acct:
-            entry["plan"] = acct["plan"]
-        if "quota_limit" in acct:
-            entry["quota_limit"] = acct["quota_limit"]
-        if "premium_used" in acct:
-            entry["premium_used"] = acct["premium_used"]
-        if entry:
-            meta[token] = entry
-    return meta
 
 
 def resolve_github_tokens(
@@ -204,21 +186,11 @@ def device_flow_login() -> str:
         if username:
             print(f"Logged in as {username}")
 
-            # Prompt for plan, quota, and current usage
-            plan = input("Copilot plan [free/pro/pro+/business/enterprise] (pro): ").strip() or "pro"
-            default_quota = {"free": "50", "pro": "300", "pro+": "1500",
-                             "business": "300", "enterprise": "1000"}.get(plan, "300")
-            quota_str = input(f"Monthly premium request quota ({default_quota}): ").strip()
-            quota_limit = int(quota_str) if quota_str else int(default_quota)
-            usage_str = input("Current premium request usage (0): ").strip()
-            premium_used = float(usage_str) if usage_str else 0
-
             accounts = _load_github_tokens()
             accounts = [a for a in accounts if a["github_token"] != token]
             accounts.append({
-                "github_token": token, "username": username,
-                "plan": plan, "quota_limit": quota_limit,
-                "premium_used": premium_used,
+                "github_token": token,
+                "username": username,
             })
             _save_github_tokens(accounts)
             _print_cached_accounts(accounts)
@@ -252,7 +224,7 @@ def logout(username: str | None = None) -> None:
 
 
 def list_accounts() -> list[dict]:
-    """Return cached accounts with validity status, plan, quota, and usage."""
+    """Return cached GitHub Copilot accounts with validity status."""
     accounts = _load_github_tokens()
     result = []
     for acct in accounts:
@@ -261,25 +233,17 @@ def list_accounts() -> list[dict]:
         result.append({
             "username": acct["username"],
             "valid": username is not None,
-            "plan": acct.get("plan"),
-            "quota_limit": acct.get("quota_limit"),
-            "premium_used": acct.get("premium_used", 0),
         })
     return result
 
 
 
-def add_account(token: str, *, plan: str | None = None,
-                quota_limit: int | None = None,
-                premium_used: float | None = None) -> dict | None:
+def add_account(token: str) -> dict | None:
     """Validate a GitHub OAuth token (ghu_) and add it to the cached accounts.
 
     Rejects PATs (ghp_) up-front since the Copilot API returns 404 for them.
-    Returns a dict with username/plan/quota_limit/premium_used on success, None if invalid.
+    Returns a dict with username on success, None if invalid.
     """
-    # plan/quota are retained as informational fields only — the quota model was
-    # removed (Copilot credit pricing); rotation uses live utilization now.
-
     if token.startswith("ghp_"):
         print(
             f"Error: token ending in ...{token[-4:]} is a Personal Access Token (ghp_). "
@@ -292,22 +256,14 @@ def add_account(token: str, *, plan: str | None = None,
     if not username:
         return None
 
-    plan = plan or "pro"
-    if quota_limit is None:
-        quota_limit = 300
-    if premium_used is None:
-        premium_used = 0
-
     accounts = _load_github_tokens()
     accounts = [a for a in accounts if a["github_token"] != token]
     accounts.append({
-        "github_token": token, "username": username,
-        "plan": plan, "quota_limit": quota_limit,
-        "premium_used": premium_used,
+        "github_token": token,
+        "username": username,
     })
     _save_github_tokens(accounts)
-    return {"username": username, "plan": plan, "quota_limit": quota_limit,
-            "premium_used": premium_used}
+    return {"username": username}
 
 
 def remove_account(username: str) -> bool:
@@ -321,30 +277,6 @@ def remove_account(username: str) -> bool:
         return False
     _save_github_tokens(filtered)
     return True
-
-
-def update_account(username: str, *, plan: str | None = None,
-                   quota_limit: int | None = None,
-                   premium_used: float | None = None) -> bool:
-    """Update plan, quota_limit, and/or premium_used for a cached account.
-
-    Returns True if the account was found and updated, False otherwise.
-    """
-    accounts = _load_github_tokens()
-    found = False
-    for acct in accounts:
-        if acct["username"] == username:
-            if plan is not None:
-                acct["plan"] = plan
-            if quota_limit is not None:
-                acct["quota_limit"] = quota_limit
-            if premium_used is not None:
-                acct["premium_used"] = premium_used
-            found = True
-            break
-    if found:
-        _save_github_tokens(accounts)
-    return found
 
 
 def _print_cached_accounts(accounts: list[dict]) -> None:

@@ -2,8 +2,7 @@
 
 Supports two backends in a single pool:
 
-* **copilot** — GitHub Copilot accounts (device-flow OAuth, billed in premium
-  requests against the Copilot plan).
+* **copilot** — GitHub Copilot accounts (device-flow OAuth).
 * **anthropic** — real Claude Max subscriptions (claude.ai PKCE OAuth, talks
   directly to api.anthropic.com).
 
@@ -25,7 +24,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from lib.auth import CopilotTokenManager, update_account  # noqa: F401  (update_account kept for callers)
+from lib.auth import CopilotTokenManager
 from lib.client import CopilotClient
 from lib.anthropic_auth import (
     AnthropicTokenManager,
@@ -38,8 +37,7 @@ from lib.chatgpt_client import ChatGPTClient
 logger = logging.getLogger(__name__)
 
 # Rotation is driven by live backend utilization (see fetch_usage on the
-# clients), not a local premium-request counter — Copilot moved to credit-based
-# pricing, which made the old per-model multiplier / quota model meaningless.
+# clients), not a local counter.
 
 # Conversation-key stickiness TTL — matches the .NET sibling's 60-minute idle
 # eviction. Long enough that a Claude Code session never falls out of cache
@@ -60,7 +58,6 @@ class AccountInfo:
     account_id: str | None = None  # chatgpt-account-id (chatgpt backend only)
     utilization: float | None = None  # live 0..1 from the usage poller; None = no signal
     unavailable_until: float | None = None  # transient back-off (rate limit / model mismatch)
-    last_request_time: float | None = None
 
     def is_available(self) -> bool:
         if self.unavailable_until is not None and time.time() < self.unavailable_until:
@@ -82,8 +79,7 @@ class AccountManager:
     """
 
     # least-utilized (default) rotates by live backend utilization; round-robin
-    # ignores it. The legacy max-usage/min-usage strategies are gone (quota model
-    # removed) and map to least-utilized.
+    # ignores it.
     STRATEGIES = ("least-utilized", "round-robin")
 
     def __init__(
@@ -91,10 +87,7 @@ class AccountManager:
         accounts: list[dict],
         strategy: str = "least-utilized",
         rate_limit_backoff_seconds: int = 3600,
-        **_legacy,  # absorb removed quota_limit/plan kwargs from old callers
     ):
-        if strategy in ("max-usage", "min-usage"):
-            strategy = "least-utilized"
         if strategy not in self.STRATEGIES:
             raise ValueError(f"Unknown strategy: {strategy!r}")
         if not accounts:
@@ -292,9 +285,7 @@ class AccountManager:
             return acct.client
 
     async def record_usage(self, client: Any, model: str) -> None:
-        """No-op. The local premium-usage counter was removed (Copilot's
-        credit-based pricing made it meaningless); rotation uses live
-        utilization instead. Kept so existing call sites don't break."""
+        """No-op. Rotation uses live utilization from provider endpoints."""
         return
 
     async def remember_conversation(self, conv_key: str | None, client: Any) -> None:
@@ -333,22 +324,6 @@ class AccountManager:
         event loop is running (e.g. FastAPI startup)."""
         if self._usage_task is None:
             self._usage_task = asyncio.ensure_future(self._usage_poller())
-
-    async def record_request_time(self, client: Any) -> None:
-        async with self._lock:
-            for acct in self._accounts:
-                if acct.client is client:
-                    acct.last_request_time = time.time()
-                    break
-
-    async def get_minutes_since_last_request(self, client: Any) -> float | None:
-        async with self._lock:
-            for acct in self._accounts:
-                if acct.client is client:
-                    if acct.last_request_time is None:
-                        return None
-                    return (time.time() - acct.last_request_time) / 60.0
-        return None
 
     async def mark_exhausted(self, client: Any) -> None:
         """Sideline the account owning *client* using the default backoff."""
@@ -467,7 +442,7 @@ class AccountManager:
 
         if not available:
             raise RuntimeError(
-                "All accounts are unavailable (rate-limited or quota-exhausted upstream)."
+                "All accounts are unavailable (rate-limited or sidelined upstream)."
             )
 
         return self._pick_from(available)

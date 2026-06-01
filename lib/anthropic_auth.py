@@ -5,7 +5,7 @@ Mirrors :mod:`lib.auth` but for real Anthropic Max-subscription accounts.
 These tokens authenticate against ``api.anthropic.com`` directly (via
 :class:`lib.anthropic_client.AnthropicClient`), independent of GitHub Copilot
 — they're for pooling Claude Max subscriptions so a Claude Code session can
-fall back across multiple accounts without burning Copilot premium quota.
+fall back across multiple accounts without routing those requests through Copilot.
 
 The flow is paste-back rather than localhost-callback because claude.ai's
 ``redirect_uri`` allowlist is strict (only ``console.anthropic.com``) and
@@ -61,9 +61,6 @@ def list_anthropic_accounts() -> list[dict]:
     return [
         {
             "username": a.get("username", "unknown"),
-            "plan": a.get("plan", "max"),
-            "quota_limit": a.get("quota_limit"),
-            "premium_used": a.get("premium_used", 0),
             "expires_at": a.get("expires_at"),
         }
         for a in _load_anthropic_accounts()
@@ -94,15 +91,6 @@ def update_anthropic_account_tokens(
             acct["access_token"] = access_token
             acct["refresh_token"] = refresh_token
             acct["expires_at"] = expires_at
-            _save_anthropic_accounts(accounts)
-            return
-
-
-def update_anthropic_account_usage(username: str, premium_used: float) -> None:
-    accounts = _load_anthropic_accounts()
-    for acct in accounts:
-        if acct.get("username") == username:
-            acct["premium_used"] = premium_used
             _save_anthropic_accounts(accounts)
             return
 
@@ -165,8 +153,7 @@ def exchange_claude_code(code: str, state: str, verifier: str) -> dict:
     return r.json()
 
 
-def claude_login_interactive(*, plan: str = "max",
-                             quota_limit: int | None = None) -> dict | None:
+def claude_login_interactive() -> dict | None:
     """Run the full claude.ai PKCE paste-back login flow against the terminal.
 
     Adds the resulting account to the Anthropic accounts cache and returns its
@@ -231,14 +218,11 @@ def claude_login_interactive(*, plan: str = "max",
         "access_token": access_token,
         "refresh_token": refresh_token,
         "expires_at": expires_at,
-        "plan": plan,
-        "quota_limit": quota_limit,
-        "premium_used": 0,
         "added_at": datetime.now(timezone.utc).isoformat(),
     })
     _save_anthropic_accounts(accounts)
-    print(f"\nLogged in as {username} (plan: {plan})")
-    return {"username": username, "plan": plan, "quota_limit": quota_limit}
+    print(f"\nLogged in as {username}")
+    return {"username": username}
 
 
 # ---------------------------------------------------------------------------
@@ -330,8 +314,8 @@ class AnthropicTokenManager:
 def resolve_anthropic_accounts() -> list[dict]:
     """Return cached Anthropic accounts as account-manager-shaped dicts.
 
-    Each entry includes the access_token, refresh_token, expires_at, plan,
-    quota_limit, premium_used, and username — enough for ``AccountManager`` to
+    Each entry includes the access_token, refresh_token, expires_at, and
+    username — enough for ``AccountManager`` to
     construct an :class:`AnthropicClient` per account.
     """
     return _load_anthropic_accounts()

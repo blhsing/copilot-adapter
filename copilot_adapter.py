@@ -3,7 +3,9 @@
 import asyncio
 import json
 import os
+import re
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import click
@@ -11,7 +13,6 @@ import click
 from lib.configure import CONFIGURATORS
 
 _DEFAULT_CONFIG = Path.home() / ".config" / "copilot-adapter" / "config.json"
-_VALID_PLANS = ("free", "pro", "pro+", "business", "enterprise")
 
 
 def _supports_color() -> bool:
@@ -53,23 +54,6 @@ def _load_config(path: str | None) -> dict:
         return json.load(f)
 
 
-def _parse_token_spec(raw: str) -> dict:
-    """Parse a token spec like ``ghu_xxx`` or ``ghu_xxx:free:50:10.5``.
-
-    Returns a dict with keys ``token`` and optionally ``plan``,
-    ``quota_limit``, and ``premium_used``.
-    """
-    parts = raw.split(":")
-    result: dict = {"token": parts[0]}
-    if len(parts) >= 2 and parts[1]:
-        result["plan"] = parts[1]
-    if len(parts) >= 3 and parts[2]:
-        result["quota_limit"] = int(parts[2])
-    if len(parts) >= 4 and parts[3]:
-        result["premium_used"] = float(parts[3])
-    return result
-
-
 @click.group()
 def main():
     """OpenAI-compatible API server backed by GitHub Copilot."""
@@ -87,14 +71,7 @@ def login():
 
 
 @main.command("claude-login")
-@click.option("--plan", default="max",
-              help="Plan label for the Anthropic account (informational; "
-                   "Anthropic Max subscriptions don't expose a quota). "
-                   "Default: 'max'.")
-@click.option("--quota-limit", default=None, type=int, metavar="N",
-              help="Optional synthetic quota for usage tracking. "
-                   "Exhaustion comes from upstream 429s, not arithmetic.")
-def claude_login(plan: str, quota_limit: int | None):
+def claude_login():
     """Authenticate against claude.ai via PKCE paste-back OAuth.
 
     Adds the resulting Claude Max subscription to the Anthropic accounts
@@ -103,7 +80,7 @@ def claude_login(plan: str, quota_limit: int | None):
     pool is exhausted.
     """
     from lib.anthropic_auth import claude_login_interactive
-    result = claude_login_interactive(plan=plan, quota_limit=quota_limit)
+    result = claude_login_interactive()
     if result is None:
         raise click.ClickException("Login aborted or failed.")
 
@@ -170,34 +147,447 @@ def logout(username: str | None, remove_all: bool):
         do_logout(username=username)
 
 
+def _format_usage_value(value) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    return f"{number:g}"
+
+
+def _first_present(data: dict, keys: tuple[str, ...]):
+    for key in keys:
+        value = data.get(key)
+        if value is not None:
+            return value
+    return None
+
+
+def _duration_seconds(value, *, numeric_unit_seconds: float = 1.0) -> int | None:
+    try:
+        seconds = int(round(float(value) * numeric_unit_seconds))
+    except (TypeError, ValueError):
+        if not isinstance(value, str):
+            return None
+        match = re.fullmatch(
+            r"\s*(\d+(?:\.\d+)?)\s*"
+            r"(seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h|days?|d)\s*",
+            value,
+            re.IGNORECASE,
+        )
+        if match is None:
+            return None
+        amount = float(match.group(1))
+        unit = match.group(2).lower()
+        if unit.startswith(("d", "day")):
+            seconds = int(round(amount * 86400))
+        elif unit.startswith(("h", "hour", "hr")):
+            seconds = int(round(amount * 3600))
+        elif unit.startswith(("m", "min")):
+            seconds = int(round(amount * 60))
+        else:
+            seconds = int(round(amount))
+    if seconds < 0:
+        return None
+    return seconds
+
+
+def _format_duration_seconds(value) -> str | None:
+    seconds = _duration_seconds(value)
+    if seconds is None:
+        return None
+    if seconds == 0:
+        return "0s"
+
+    units = [
+        ("d", 86400),
+        ("h", 3600),
+        ("m", 60),
+        ("s", 1),
+    ]
+    parts = []
+    remaining = seconds
+    for suffix, unit_seconds in units:
+        amount, remaining = divmod(remaining, unit_seconds)
+        if amount:
+            parts.append(f"{amount}{suffix}")
+        if len(parts) == 2:
+            break
+    return " ".join(parts)
+
+
+def _format_duration_label(seconds: int) -> str:
+    if seconds >= 86400 and seconds % 86400 == 0:
+        days = seconds // 86400
+        return f"{days}-day"
+    if seconds >= 3600 and seconds % 3600 == 0:
+        hours = seconds // 3600
+        return f"{hours}-hour"
+    if seconds >= 86400:
+        days, remainder = divmod(seconds, 86400)
+        if remainder % 3600 == 0:
+            hours = remainder // 3600
+            suffix = f" {hours}-hour" if hours else ""
+            return f"{days}-day{suffix}"
+    if seconds >= 3600:
+        hours, remainder = divmod(seconds, 3600)
+        if remainder % 60 == 0:
+            minutes = remainder // 60
+            suffix = f" {minutes}-minute" if minutes else ""
+            return f"{hours}-hour{suffix}"
+    if seconds >= 60 and seconds % 60 == 0:
+        minutes = seconds // 60
+        return f"{minutes}-minute"
+    return f"{seconds}-second"
+
+
+def _parse_timestamp(value) -> datetime | None:
+    if isinstance(value, (int, float)):
+        number = float(value)
+        if number > 1_000_000_000_000:
+            number /= 1000
+        if number < 946_684_800:
+            return None
+        try:
+            return datetime.fromtimestamp(number, tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+    if not isinstance(value, str):
+        return None
+
+    raw = value.strip()
+    if not raw:
+        return None
+    try:
+        number = float(raw)
+    except ValueError:
+        number = None
+    if number is not None:
+        return _parse_timestamp(number)
+
+    normalized = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _format_timestamp(value) -> str:
+    parsed = _parse_timestamp(value)
+    if parsed is None:
+        return str(value)
+    return parsed.strftime("%Y-%m-%d %H:%M UTC")
+
+
+def _usage_window_seconds(window: dict) -> int | None:
+    window_seconds = _first_present(window, (
+        "limit_window_seconds",
+        "window_seconds",
+        "duration_seconds",
+        "period_seconds",
+        "interval_seconds",
+        "limitWindowSeconds",
+        "windowSeconds",
+        "durationSeconds",
+        "periodSeconds",
+        "intervalSeconds",
+        "window",
+        "duration",
+        "period",
+        "interval",
+    ))
+    duration = _duration_seconds(window_seconds)
+    if duration is not None:
+        return duration
+
+    window_minutes = _first_present(window, (
+        "limit_window_minutes",
+        "window_minutes",
+        "duration_minutes",
+        "period_minutes",
+        "interval_minutes",
+        "limitWindowMinutes",
+        "windowMinutes",
+        "durationMinutes",
+        "periodMinutes",
+        "intervalMinutes",
+        "windowDurationMins",
+    ))
+    duration = _duration_seconds(window_minutes, numeric_unit_seconds=60)
+    if duration is not None:
+        return duration
+
+    window_ms = _first_present(window, (
+        "limit_window_milliseconds",
+        "window_milliseconds",
+        "duration_milliseconds",
+        "period_milliseconds",
+        "interval_milliseconds",
+        "limit_window_ms",
+        "window_ms",
+        "duration_ms",
+        "period_ms",
+        "interval_ms",
+        "limitWindowMilliseconds",
+        "windowMilliseconds",
+        "durationMilliseconds",
+        "periodMilliseconds",
+        "intervalMilliseconds",
+        "limitWindowMs",
+        "windowMs",
+        "durationMs",
+        "periodMs",
+        "intervalMs",
+    ))
+    duration = _duration_seconds(window_ms, numeric_unit_seconds=0.001)
+    if duration is not None:
+        return duration
+
+    starts_at = _first_present(window, (
+        "start_at",
+        "starts_at",
+        "started_at",
+        "start_time",
+        "startAt",
+        "startsAt",
+        "startedAt",
+        "startTime",
+        "start",
+    ))
+    ends_at = _first_present(window, (
+        "end_at",
+        "ends_at",
+        "expires_at",
+        "expire_at",
+        "end_time",
+        "endAt",
+        "endsAt",
+        "expiresAt",
+        "expireAt",
+        "endTime",
+        "end",
+    ))
+    start = _parse_timestamp(starts_at)
+    end = _parse_timestamp(ends_at)
+    if start is not None and end is not None and end > start:
+        return int(round((end - start).total_seconds()))
+    return None
+
+
+def _format_usage_window_label(window: dict, fallback: str) -> str:
+    seconds = _usage_window_seconds(window)
+    if seconds is None:
+        return fallback
+    return f"{_format_duration_label(seconds)} limit"
+
+
+def _format_usage_window_timing(window: dict, *, include_duration: bool) -> list[str]:
+    parts = []
+
+    duration = _format_duration_seconds(_usage_window_seconds(window))
+    if include_duration and duration is not None:
+        parts.append(f"window {duration}")
+
+    resets_in = _first_present(window, (
+        "resets_in_seconds",
+        "reset_after_seconds",
+        "seconds_until_reset",
+        "reset_seconds",
+        "retry_after_seconds",
+        "resetsInSeconds",
+        "resetAfterSeconds",
+        "secondsUntilReset",
+        "resetSeconds",
+        "retryAfterSeconds",
+        "retry_after",
+        "retryAfter",
+    ))
+    reset_duration = _format_duration_seconds(resets_in)
+    if reset_duration is not None:
+        parts.append(f"resets in {reset_duration}")
+        return parts
+
+    resets_at = _first_present(window, (
+        "reset_at",
+        "resets_at",
+        "reset_time",
+        "resetAt",
+        "resetsAt",
+        "resetTime",
+        "reset",
+    ))
+    if resets_at is not None:
+        parts.append(f"resets {_format_timestamp(resets_at)}")
+    else:
+        ends_at = _first_present(window, (
+            "end_at",
+            "ends_at",
+            "expires_at",
+            "expire_at",
+            "end_time",
+            "endAt",
+            "endsAt",
+            "expiresAt",
+            "expireAt",
+            "endTime",
+            "end",
+        ))
+        if ends_at is not None:
+            parts.append(f"ends {_format_timestamp(ends_at)}")
+    return parts
+
+
+def _format_usage_window(
+    label: str,
+    window: dict,
+    *,
+    include_window_duration: bool = True,
+) -> str | None:
+    percent = _first_present(window, ("utilization", "used_percent", "usedPercent"))
+    used = _first_present(window, ("used", "usage", "current", "consumed"))
+    limit = _first_present(window, ("limit", "quota", "max", "total"))
+    remaining = _first_present(window, ("remaining", "available"))
+
+    parts = []
+    if percent is not None:
+        parts.append(f"{_format_usage_value(percent)}% used")
+    if used is not None and limit is not None:
+        parts.append(f"{_format_usage_value(used)}/{_format_usage_value(limit)}")
+    elif used is not None:
+        parts.append(f"used {_format_usage_value(used)}")
+    elif limit is not None:
+        parts.append(f"limit {_format_usage_value(limit)}")
+    if remaining is not None:
+        parts.append(f"remaining {_format_usage_value(remaining)}")
+    parts.extend(
+        _format_usage_window_timing(
+            window,
+            include_duration=include_window_duration,
+        )
+    )
+
+    if not parts:
+        return None
+    return f"{label}: {', '.join(parts)}"
+
+
+def _format_usage_details(backend: str, details: dict | None) -> str:
+    if not details:
+        return "usage: unavailable"
+    if backend == "anthropic":
+        windows = [
+            ("5-hour limit", details.get("five_hour")),
+            ("7-day total limit", details.get("seven_day")),
+            ("7-day Opus limit", details.get("seven_day_opus")),
+            ("7-day Sonnet limit", details.get("seven_day_sonnet")),
+        ]
+    else:
+        rate_limit = details.get("rate_limit") or {}
+        primary_window = rate_limit.get("primary_window")
+        secondary_window = rate_limit.get("secondary_window")
+        windows = [
+            (
+                _format_usage_window_label(primary_window, "5-hour limit")
+                if isinstance(primary_window, dict) else "5-hour limit",
+                primary_window,
+            ),
+            (
+                _format_usage_window_label(secondary_window, "7-day limit")
+                if isinstance(secondary_window, dict) else "7-day limit",
+                secondary_window,
+            ),
+        ]
+    summaries = [
+        summary
+        for label, window in windows
+        if isinstance(window, dict)
+        for summary in [
+            _format_usage_window(
+                label,
+                window,
+                include_window_duration=backend != "chatgpt",
+            )
+        ]
+        if summary
+    ]
+    if not summaries:
+        return "usage: available, unrecognized response shape"
+    return "usage: " + "; ".join(summaries)
+
+
+async def _fetch_anthropic_usage(accounts: list[dict]) -> dict[str, dict | None]:
+    from lib.anthropic_auth import (
+        AnthropicTokenManager,
+        update_anthropic_account_tokens,
+    )
+    from lib.anthropic_client import AnthropicClient
+
+    usage: dict[str, dict | None] = {}
+    for acct in accounts:
+        username = acct.get("username", "unknown")
+
+        def _on_rotated(new_access: str, new_refresh: str, new_expires: float,
+                        username=username):
+            update_anthropic_account_tokens(username, new_access,
+                                            new_refresh, new_expires)
+
+        tm = AnthropicTokenManager(
+            acct.get("access_token", ""),
+            acct.get("refresh_token", ""),
+            float(acct.get("expires_at", 0)),
+            on_rotated=_on_rotated,
+        )
+        usage[username] = await AnthropicClient(
+            tm, account_label=username
+        ).fetch_usage_details()
+    return usage
+
+
+async def _fetch_chatgpt_usage(accounts: list[dict]) -> dict[str, dict | None]:
+    from lib.chatgpt_client import ChatGPTClient
+    from lib.openai_auth import (
+        OpenAITokenManager,
+        update_chatgpt_account_tokens,
+    )
+
+    usage: dict[str, dict | None] = {}
+    for acct in accounts:
+        username = acct.get("username", "unknown")
+
+        def _on_rotated(new_access: str, new_refresh: str, new_expires: float,
+                        username=username):
+            update_chatgpt_account_tokens(username, new_access,
+                                          new_refresh, new_expires)
+
+        tm = OpenAITokenManager(
+            acct.get("access_token", ""),
+            acct.get("refresh_token", ""),
+            float(acct.get("expires_at", 0)),
+            on_rotated=_on_rotated,
+        )
+        usage[username] = await ChatGPTClient(
+            tm, acct.get("account_id"), account_label=username,
+        ).fetch_usage_details()
+    return usage
+
+
 @main.command()
 @click.option("--add", "add_token", default=None, metavar="TOKEN",
               help="Add a GitHub OAuth token (ghu_) to the cached accounts. PATs (ghp_) are rejected by the Copilot API.")
 @click.option("--remove", "remove_username", default=None, metavar="USER",
-              help="Remove a cached account by username.")
-@click.option("--update", "update_username", default=None, metavar="USER",
-              help="Update settings for a cached account by username.")
-@click.option("--plan", "update_plan", default=None,
-              type=click.Choice(list(_VALID_PLANS)),
-              help="Set the Copilot plan for the account.")
-@click.option("--quota-limit", "update_quota", default=None, type=int, metavar="N",
-              help="Set the monthly premium request quota for the account.")
-@click.option("--usage", "update_usage", default=None, type=float, metavar="N",
-              help="Set the current premium request usage for the account.")
-def accounts(add_token: str | None, remove_username: str | None,
-             update_username: str | None, update_plan: str | None,
-             update_quota: int | None, update_usage: float | None):
-    """Manage cached accounts: list, add, remove, or update."""
-    from lib.auth import (add_account, list_accounts,
-                          remove_account, update_account)
+              help="Remove a cached GitHub Copilot account by username.")
+def accounts(add_token: str | None, remove_username: str | None):
+    """List cached accounts; add/remove GitHub Copilot accounts."""
+    from lib.auth import add_account, list_accounts, remove_account
 
     if add_token:
-        result = add_account(add_token, plan=update_plan, quota_limit=update_quota,
-                             premium_used=update_usage)
+        result = add_account(add_token)
         if result is None:
             raise click.ClickException("Invalid token — could not authenticate with GitHub")
-        print(f"Added {result['username']} (plan: {result['plan']}, "
-              f"quota: {result['quota_limit']}, usage: {result['premium_used']})")
+        print(f"Added {result['username']}")
         return
 
     if remove_username:
@@ -206,33 +596,41 @@ def accounts(add_token: str | None, remove_username: str | None,
         print(f"Removed {remove_username}")
         return
 
-    if update_username:
-        if update_plan is None and update_quota is None and update_usage is None:
-            raise click.UsageError("--update requires --plan, --quota-limit, and/or --usage")
-        if not update_account(update_username, plan=update_plan, quota_limit=update_quota,
-                              premium_used=update_usage):
-            raise click.ClickException(f"Account '{update_username}' not found in cache")
-        print(f"Updated {update_username}:")
-        if update_plan is not None:
-            print(f"  plan: {update_plan}")
-        if update_quota is not None:
-            print(f"  quota: {update_quota}")
-        if update_usage is not None:
-            print(f"  usage: {update_usage}")
-        return
+    copilot_accounts = list_accounts()
+    try:
+        from lib.anthropic_auth import resolve_anthropic_accounts
+        anthropic_accounts = resolve_anthropic_accounts()
+    except Exception:
+        anthropic_accounts = []
+    try:
+        from lib.openai_auth import resolve_chatgpt_accounts
+        chatgpt_accounts = resolve_chatgpt_accounts()
+    except Exception:
+        chatgpt_accounts = []
 
-    accts = list_accounts()
-    if not accts:
+    if not copilot_accounts and not anthropic_accounts and not chatgpt_accounts:
         print("No cached accounts.")
         return
-    print(f"Cached accounts ({len(accts)}):")
-    for acct in accts:
-        status = "valid" if acct["valid"] else "expired/invalid"
-        plan = acct.get("plan") or "unset"
-        quota = acct.get("quota_limit")
-        quota_str = str(quota) if quota is not None else "unset"
-        usage = round(acct.get("premium_used", 0), 2)
-        print(f"  - {acct['username']} ({status}, plan: {plan}, usage: {usage}/{quota_str})")
+
+    if copilot_accounts:
+        print(f"Copilot accounts ({len(copilot_accounts)}):")
+        for acct in copilot_accounts:
+            status = "valid" if acct["valid"] else "expired/invalid"
+            print(f"  - {acct['username']} ({status}, usage: no endpoint)")
+
+    if anthropic_accounts:
+        usage = asyncio.run(_fetch_anthropic_usage(anthropic_accounts))
+        print(f"Anthropic accounts ({len(anthropic_accounts)}):")
+        for acct in anthropic_accounts:
+            username = acct.get("username", "unknown")
+            print(f"  - {username} ({_format_usage_details('anthropic', usage.get(username))})")
+
+    if chatgpt_accounts:
+        usage = asyncio.run(_fetch_chatgpt_usage(chatgpt_accounts))
+        print(f"ChatGPT accounts ({len(chatgpt_accounts)}):")
+        for acct in chatgpt_accounts:
+            username = acct.get("username", "unknown")
+            print(f"  - {username} ({_format_usage_details('chatgpt', usage.get(username))})")
 
 
 @main.command("ca-cert")
@@ -339,7 +737,7 @@ def config(tool: str, revert: bool, host: str, port: int,
               help="Port to bind to.")
 @click.option("--github-token", multiple=True, envvar="COPILOT_ADAPTER_GITHUB_TOKEN",
               metavar="TOKEN",
-              help="GitHub OAuth token (ghu_) from device-flow login (repeatable, supports TOKEN:PLAN:QUOTA:USAGE format). "
+              help="GitHub OAuth token (ghu_) from device-flow login (repeatable). "
                    "PATs (ghp_) are rejected — the Copilot API returns 404 for them. "
                    "Env var supports comma-separated values.")
 @click.option("--cors-origin", multiple=True, envvar="COPILOT_ADAPTER_CORS_ORIGIN",
@@ -349,24 +747,16 @@ def config(tool: str, revert: bool, host: str, port: int,
               metavar="N",
               help="Number of worker processes (default: 1).")
 @click.option("--strategy", default=None,
-              type=click.Choice(["least-utilized", "round-robin",
-                                 "max-usage", "min-usage"]),
+              type=click.Choice(["least-utilized", "round-robin"]),
               envvar="COPILOT_ADAPTER_STRATEGY",
               help="Account rotation strategy (default: least-utilized). "
-                   "least-utilized rotates by live backend usage; the legacy "
-                   "max-usage/min-usage map to least-utilized.")
-@click.option("--quota-limit", default=None, type=int,
-              envvar="COPILOT_ADAPTER_QUOTA_LIMIT", metavar="N",
-              help="Default monthly premium request limit per account (default: 300).")
+                   "least-utilized rotates by live backend usage for "
+                   "Anthropic/ChatGPT accounts; Copilot accounts round-robin.")
 @click.option("--rate-limit-backoff-minutes", default=None, type=int,
               envvar="COPILOT_ADAPTER_RATE_LIMIT_BACKOFF_MINUTES", metavar="N",
               help="Minutes to sideline an account after a transient upstream failure "
                    "(e.g. 429 rate limit) before it becomes eligible again "
                    "(default: 60).")
-@click.option("--plan", default=None,
-              type=click.Choice(list(_VALID_PLANS)),
-              envvar="COPILOT_ADAPTER_PLAN",
-              help="Default Copilot plan type for premium request multipliers (default: pro).")
 @click.option("--log-level", default=None,
               type=click.Choice(["debug", "info", "warning", "error"], case_sensitive=False),
               envvar="COPILOT_ADAPTER_LOG_LEVEL",
@@ -374,22 +764,6 @@ def config(tool: str, revert: bool, host: str, port: int,
 @click.option("--log-file", default=None, metavar="PATH",
               envvar="COPILOT_ADAPTER_LOG_FILE",
               help="Append logs to PATH in addition to the console.")
-@click.option("--free", "force_free", is_flag=True, default=False,
-              envvar="COPILOT_ADAPTER_FREE",
-              help="Mark all requests as agent-initiated so nothing counts as a premium request.")
-@click.option("--free-within-minutes", type=float, default=None, metavar="N",
-              envvar="COPILOT_ADAPTER_FREE_WITHIN_MINUTES",
-              help="Mark user requests as agent-initiated if the last request "
-                   "was less than N minutes ago. Mutually exclusive with --free.")
-@click.option("--stub-bill", "stub_bill", is_flag=True, default=False,
-              envvar="COPILOT_ADAPTER_STUB_BILL",
-              help="For each user-initiated request, first fire a tiny billed "
-                   "stub call against --stub-model, then run the real request "
-                   "as agent-initiated. Falls through to normal billing if the "
-                   "stub call fails.")
-@click.option("--stub-model", default=None, metavar="MODEL",
-              envvar="COPILOT_ADAPTER_STUB_MODEL",
-              help="Model used by --stub-bill (default: claude-haiku-4.5).")
 @click.option("--proxy", "proxy_mode", is_flag=True, default=False,
               envvar="COPILOT_ADAPTER_PROXY",
               help="Enable forward proxy mode on the same port. CONNECT requests to "
@@ -472,11 +846,8 @@ def config(tool: str, revert: bool, host: str, port: int,
 def serve(config_path: str | None, host: str | None, port: int | None,
           github_token: tuple[str, ...], cors_origin: tuple[str, ...],
           workers: int | None, strategy: str | None,
-          quota_limit: int | None, rate_limit_backoff_minutes: int | None,
-          plan: str | None,
-          log_level: str | None, log_file: str | None, force_free: bool,
-          free_within_minutes: float | None,
-          stub_bill: bool, stub_model: str | None,
+          rate_limit_backoff_minutes: int | None,
+          log_level: str | None, log_file: str | None,
           proxy_mode: bool,
           ca_dir: str | None, model_map_raw: tuple[str, ...],
           proxy_user: str | None, proxy_password: str | None,
@@ -492,7 +863,7 @@ def serve(config_path: str | None, host: str | None, port: int | None,
     import uvicorn
 
     from lib.account_manager import AccountManager
-    from lib.auth import get_cached_account_meta, resolve_github_tokens
+    from lib.auth import resolve_github_tokens
     from lib.server import init_app
     from lib.logging import build_runtime_logging_config
     from lib.anthropic_auth import resolve_anthropic_accounts
@@ -510,22 +881,13 @@ def serve(config_path: str | None, host: str | None, port: int | None,
     host = host or cfg.get("host", "127.0.0.1")
     port = port or cfg.get("port", 18080)
     workers = workers if workers is not None else cfg.get("workers", 1)
-    strategy = strategy or cfg.get("strategy", "max-usage")
-    quota_limit = quota_limit if quota_limit is not None else cfg.get("quota_limit")
+    strategy = strategy or cfg.get("strategy", "least-utilized")
     rate_limit_backoff_minutes = (
         rate_limit_backoff_minutes if rate_limit_backoff_minutes is not None
         else cfg.get("rate_limit_backoff_minutes", 60)
     )
-    plan = plan or cfg.get("plan", "pro")
     log_level = log_level or cfg.get("log_level", "info")
     log_file = log_file or cfg.get("log_file")
-    force_free = force_free or cfg.get("free", False)
-    free_within_minutes = (free_within_minutes if free_within_minutes is not None
-                           else cfg.get("free_within_minutes"))
-    stub_bill = stub_bill or cfg.get("stub_bill", False)
-    stub_model = stub_model or cfg.get("stub_model") or "claude-haiku-4.5"
-    if force_free and free_within_minutes is not None:
-        raise click.UsageError("--free and --free-within-minutes are mutually exclusive.")
     proxy_mode = proxy_mode or cfg.get("proxy", False)
     ca_dir = Path(ca_dir) if ca_dir else cfg.get("ca_dir")
     if isinstance(ca_dir, str):
@@ -579,52 +941,27 @@ def serve(config_path: str | None, host: str | None, port: int | None,
             api_tokens = stored
 
     # --- Resolve accounts ---
-    # CLI/env tokens (may include :plan:quota:usage annotations)
-    cli_token_specs = []
+    cli_tokens = []
     for raw in github_token:
         for part in raw.split(","):
             part = part.strip()
             if part:
-                cli_token_specs.append(_parse_token_spec(part))
+                cli_tokens.append(part)
 
     # Config file accounts
     cfg_accounts = cfg.get("accounts", [])
 
-    # Build a per-account overrides map keyed by token value.
-    # Cached metadata first (lowest), then config file, then CLI (highest).
-    cached_meta = get_cached_account_meta()
-    account_overrides: dict[str, dict] = {}
-
-    # Layer 1: cached device-flow metadata
-    for token, meta in cached_meta.items():
-        account_overrides[token] = {"token": token, **meta}
-
-    # Layer 2: config file entries
+    cfg_tokens = []
     for entry in cfg_accounts:
         if isinstance(entry, str):
-            spec = _parse_token_spec(entry)
+            cfg_tokens.append(entry)
         elif isinstance(entry, dict):
-            spec = dict(entry)
-        else:
-            continue
-        token = spec["token"]
-        if token in account_overrides:
-            account_overrides[token].update(spec)
-        else:
-            account_overrides[token] = spec
-
-    # Layer 3: CLI/env token specs
-    for spec in cli_token_specs:
-        token = spec["token"]
-        if token in account_overrides:
-            account_overrides[token].update(spec)
-        else:
-            account_overrides[token] = spec
+            token = entry.get("token")
+            if token:
+                cfg_tokens.append(token)
 
     # Resolve tokens → (token, username) via GitHub API validation.
-    explicit_tokens = [s["token"] for s in cli_token_specs] or None
-    if not explicit_tokens and cfg_accounts:
-        explicit_tokens = [s["token"] for s in account_overrides.values()]
+    explicit_tokens = cli_tokens or cfg_tokens or None
 
     print("Resolving accounts...")
     # serve runs headless: never block on interactive device flow, and allow
@@ -633,17 +970,12 @@ def serve(config_path: str | None, host: str | None, port: int | None,
         explicit_tokens, interactive=False, required=False
     )
 
-    # Build rich account dicts with per-account plan/quota/usage
     accounts: list[dict] = []
     for token, username in resolved:
-        overrides = account_overrides.get(token, {})
         accounts.append({
             "token": token,
             "username": username,
             "backend": "copilot",
-            "plan": overrides.get("plan", plan),
-            "quota_limit": overrides.get("quota_limit", quota_limit),
-            "premium_used": overrides.get("premium_used", 0),
         })
 
     # Anthropic accounts come from their own on-disk cache (claude.ai PKCE
@@ -690,12 +1022,6 @@ def serve(config_path: str | None, host: str | None, port: int | None,
     if spoof_interactive:
         print("\n** Spoof interactive headers: Anthropic-pool requests will "
               "carry the REPL's User-Agent / x-app / extended anthropic-beta **")
-    if force_free:
-        print("\n** Free mode enabled: all requests will be marked as agent-initiated **")
-    if free_within_minutes is not None:
-        print(f"\n** Time-based free mode: requests within {free_within_minutes} min of last → agent **")
-    if stub_bill:
-        print(f"\n** Stub-bill mode: user requests billed via {stub_model}, real request runs as agent **")
     if api_tokens:
         print(f"\n** API token protection enabled ({len(api_tokens)} token(s)) **")
     if proxy_user and proxy_password:
@@ -718,7 +1044,6 @@ def serve(config_path: str | None, host: str | None, port: int | None,
 
     if workers > 1:
         # Workers initialize via the lifespan event using env vars
-        # Format: "token1:username1:plan1:quota1:usage1,..."
         # Only Copilot tokens go through the env; Anthropic/ChatGPT accounts are
         # reloaded from their on-disk caches in the worker lifespan (they carry
         # refresh tokens we don't serialize through the environment).
@@ -728,19 +1053,10 @@ def serve(config_path: str | None, host: str | None, port: int | None,
                 continue
             parts.append(f"{acct['token']}:{acct['username']}")
         os.environ["_COPILOT_ADAPTER_GITHUB_TOKENS"] = ",".join(parts)
+        os.environ["_COPILOT_ADAPTER_WORKER_INIT"] = "1"
         os.environ["_COPILOT_ADAPTER_STRATEGY"] = strategy
-        if quota_limit is not None:
-            os.environ["_COPILOT_ADAPTER_QUOTA_LIMIT"] = str(quota_limit)
-        os.environ["_COPILOT_ADAPTER_PLAN"] = plan
         if cors_origin:
             os.environ["_COPILOT_ADAPTER_CORS_ORIGINS"] = ",".join(cors_origin)
-        if force_free:
-            os.environ["_COPILOT_ADAPTER_FREE"] = "1"
-        if free_within_minutes is not None:
-            os.environ["_COPILOT_ADAPTER_FREE_WITHIN_MINUTES"] = str(free_within_minutes)
-        if stub_bill:
-            os.environ["_COPILOT_ADAPTER_STUB_BILL"] = "1"
-            os.environ["_COPILOT_ADAPTER_STUB_MODEL"] = stub_model
         if model_map_list is not None:
             os.environ["_COPILOT_ADAPTER_MODEL_MAP"] = ",".join(
                 f"{p}={t}" for p, t in model_map_list
@@ -771,10 +1087,6 @@ def serve(config_path: str | None, host: str | None, port: int | None,
         )
     else:
         application = init_app(acct_mgr, cors_origins=list(cors_origin) or None,
-                               force_free=force_free,
-                               free_within_minutes=free_within_minutes,
-                               stub_bill=stub_bill,
-                               stub_model=stub_model,
                                model_map=model_map_list,
                                api_tokens=api_tokens,
                                web_search_max_iterations=web_search_iterations,

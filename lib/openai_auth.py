@@ -4,7 +4,7 @@ Mirrors :mod:`lib.anthropic_auth` but for ChatGPT Plus/Pro/Business accounts.
 These tokens authenticate against ``chatgpt.com/backend-api/codex`` (via
 :class:`lib.chatgpt_client.ChatGPTClient`) — the same endpoint the Codex CLI
 uses — letting a Codex/Responses session pool multiple ChatGPT subscriptions
-instead of burning Copilot premium quota.
+instead of routing those requests through Copilot.
 
 The flow is the OpenAI-custom **device code** grant (RFC-8628-ish), the same
 one ``codex login --device-auth`` uses: no localhost callback, the user opens

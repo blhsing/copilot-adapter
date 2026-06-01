@@ -1,7 +1,7 @@
 """Unit tests for AccountManager rotation strategies."""
 
 import time
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -74,10 +74,6 @@ class TestLeastUtilized:
         mgr._accounts[2].utilization = 0.3
         client = await mgr.get_client("user")
         assert client is mgr._accounts[2].client
-
-    async def test_legacy_strategies_map_to_least_utilized(self):
-        assert _make_manager(1, "max-usage").strategy == "least-utilized"
-        assert _make_manager(1, "min-usage").strategy == "least-utilized"
 
     async def test_no_utilization_signal_round_robins(self):
         mgr = _make_manager(3, "least-utilized")
@@ -179,7 +175,7 @@ class TestExhaustionDetection:
 
 
 class TestUsageTracking:
-    async def test_record_usage_is_noop_for_removed_local_quota_model(self):
+    async def test_record_usage_is_noop_for_live_usage_rotation(self):
         mgr = _make_manager(2, "least-utilized")
         client = await mgr.get_client("user")
         acct = _acct_for_client(mgr, client)
@@ -187,8 +183,39 @@ class TestUsageTracking:
         await mgr.record_usage(client, "claude-opus-4.6")
 
         assert acct.is_available() is True
-        assert not hasattr(acct, "premium_used")
-        assert not hasattr(acct, "premium_limit")
+        assert acct.utilization is None
+
+    async def test_refresh_usage_polls_only_backends_with_usage_endpoints(self):
+        accounts = [
+            {"token": "copilot-token", "username": "copilot-user", "backend": "copilot"},
+            {
+                "username": "claude-user",
+                "backend": "anthropic",
+                "access_token": "ant-access",
+                "refresh_token": "ant-refresh",
+                "expires_at": time.time() + 3600,
+            },
+            {
+                "username": "chatgpt-user",
+                "backend": "chatgpt",
+                "access_token": "oai-access",
+                "refresh_token": "oai-refresh",
+                "expires_at": time.time() + 3600,
+                "account_id": "acct_123",
+            },
+        ]
+        mgr = AccountManager(accounts, strategy="least-utilized")
+        by_backend = {acct.backend: acct for acct in mgr.accounts}
+        by_backend["anthropic"].client.fetch_usage = AsyncMock(return_value=0.25)
+        by_backend["chatgpt"].client.fetch_usage = AsyncMock(return_value=0.75)
+
+        await mgr.refresh_usage_once()
+
+        assert by_backend["copilot"].utilization is None
+        assert by_backend["anthropic"].utilization == 0.25
+        assert by_backend["chatgpt"].utilization == 0.75
+        by_backend["anthropic"].client.fetch_usage.assert_awaited_once()
+        by_backend["chatgpt"].client.fetch_usage.assert_awaited_once()
 
 
 class TestValidation:
@@ -199,3 +226,9 @@ class TestValidation:
     async def test_invalid_strategy_raises(self):
         with pytest.raises(ValueError, match="Unknown strategy"):
             _make_manager(1, "bad-strategy")
+
+    async def test_removed_legacy_strategies_raise(self):
+        with pytest.raises(ValueError, match="Unknown strategy"):
+            _make_manager(1, "max-usage")
+        with pytest.raises(ValueError, match="Unknown strategy"):
+            _make_manager(1, "min-usage")

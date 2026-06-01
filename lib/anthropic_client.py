@@ -157,6 +157,23 @@ class AnthropicClient:
         {...}, seven_day_opus, seven_day_sonnet, ... }. Anthropic reports
         utilization as a percentage (e.g. 7.0 = 7%); normalize to 0..1.
         """
+        data = await self.fetch_usage_details()
+        if not data:
+            return None
+        try:
+            pcts = []
+            for key in ("five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet"):
+                win = data.get(key)
+                if isinstance(win, dict) and win.get("utilization") is not None:
+                    pcts.append(float(win["utilization"]))
+            if not pcts:
+                return None
+            return max(pcts) / 100.0
+        except Exception:
+            return None
+
+    async def fetch_usage_details(self) -> dict | None:
+        """Return the raw Anthropic OAuth usage payload, or None on error."""
         try:
             token = await self._token_manager.get_token()
             async with httpx.AsyncClient(timeout=30) as client:
@@ -171,14 +188,6 @@ class AnthropicClient:
                 )
             if r.status_code != 200:
                 return None
-            data = r.json() or {}
-            pcts = []
-            for key in ("five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet"):
-                win = data.get(key)
-                if isinstance(win, dict) and win.get("utilization") is not None:
-                    pcts.append(float(win["utilization"]))
-            if not pcts:
-                return None
-            return max(pcts) / 100.0
+            return r.json() or {}
         except Exception:
             return None
